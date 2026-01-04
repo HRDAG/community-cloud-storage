@@ -1,3 +1,4 @@
+from io import TextIOWrapper
 from pathlib import Path
 
 import click
@@ -14,7 +15,7 @@ def cli():
 @click.option("--cluster-peername", required=True)
 @click.option("--ts-authkey", required=True)
 @click.option("--output", type=click.File("w"), default="-")
-def create(output: click.File, cluster_peername: str, ts_authkey: str):
+def create(output: TextIOWrapper, cluster_peername: str, ts_authkey: str):
     """
     Create a new community-cloud-storage Docker Compose file.
     """
@@ -27,7 +28,7 @@ def create(output: click.File, cluster_peername: str, ts_authkey: str):
 @click.option("--output", type=click.File("w"), default="-")
 @click.option("--bootstrap-host", required=True)
 def clone(
-    cluster_peername: str, input: click.File, output: click.File, bootstrap_host: str
+    cluster_peername: str, input: TextIOWrapper, output: TextIOWrapper, bootstrap_host: str
 ):
     """
     Use an existing compose file, and running containers, to generate a
@@ -63,7 +64,7 @@ def set_bootstrap_peer(cluster_peername: str, bootstrap_host: str) -> None:
 @cli.command()
 @click.option("--cluster-peername", required=True)
 @click.argument("path", type=click.Path(exists=True, path_type=Path), required=True)
-def add(cluster_peername: str, path: click.Path) -> None:
+def add(cluster_peername: str, path: Path) -> None:
     """
     Add a file or directory to the storage cluster using a peer hostname.
     """
@@ -104,8 +105,8 @@ def rm(cid: str, cluster_peername: str) -> None:
 @click.argument("cid", required=True)
 @click.option("--cluster-peername", required=True)
 @click.option("--output", type=click.Path(exists=False, path_type=Path), required=True)
-def get(cid: str, cluster_peername: str, output: click.File) -> None:
-    """t
+def get(cid: str, cluster_peername: str, output: Path) -> None:
+    """
     Get contents of a file and write to STDOUT or a file.
     """
     compose.get(cid, host=cluster_peername, output=output)

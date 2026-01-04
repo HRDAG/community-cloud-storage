@@ -1,11 +1,20 @@
 import json
 import os
+import shlex
 import socket
 import subprocess
 from io import TextIOWrapper
 from pathlib import Path
 
 import yaml
+
+
+def _get_env_value(env_list: list, prefix: str) -> str:
+    """Extract value from environment list by prefix."""
+    for item in env_list:
+        if item.startswith(prefix):
+            return item
+    raise ValueError(f"No environment variable starting with {prefix}")
 
 
 def create(
@@ -82,7 +91,9 @@ def clone(
     output.write(
         compose_text(
             cluster_peername=cluster_peername,
-            ipfs_swarm_key=bootstrap_doc["services"]["ipfs"]["environment"][0],
+            ipfs_swarm_key=_get_env_value(
+                bootstrap_doc["services"]["ipfs"]["environment"], "IPFS_SWARM_KEY="
+            ),
             cluster_secret=bootstrap_doc["services"]["ipfs-cluster"]["environment"][
                 "CLUSTER_SECRET"
             ],
@@ -215,7 +226,7 @@ def rm(cid: str, host: str) -> str:
 
 def get(cid: str, host: str, output: Path) -> str:
     """
-    Remove a CID from the cluster.
+    Get a CID from the cluster and write to output path.
     """
     run(f"ipfs --api /dns/{host}/tcp/5001 get --output {output} {cid}")
 
@@ -225,7 +236,7 @@ def run(cmd, parse_json=False) -> str:
     Run a system command and return the output, optionally parsing JSON output.
     """
     out = subprocess.run(
-        cmd.split(" "),
+        shlex.split(cmd),
         capture_output=True,
         check=True,
     )
