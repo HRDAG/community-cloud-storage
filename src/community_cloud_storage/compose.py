@@ -235,11 +235,16 @@ def run(cmd, parse_json=False) -> str:
     """
     Run a system command and return the output, optionally parsing JSON output.
     """
-    out = subprocess.run(
-        shlex.split(cmd),
-        capture_output=True,
-        check=True,
-    )
+    try:
+        out = subprocess.run(
+            shlex.split(cmd),
+            capture_output=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr.decode("utf8").strip() if e.stderr else ""
+        raise RuntimeError(f"Command failed: {cmd}\n{stderr}") from e
+
     if parse_json:
         return json.loads(out.stdout.decode("utf8"))
     else:

@@ -107,10 +107,17 @@ You will need to create an Authorization Key to use in your community-cloud-stor
 
 Use your Tailscale token to create your bootstrap node, which here is named `bootstrap` but can be whatever you like. This will be the hostname of the bootstrap node in your Tailscale network.
 
-In place of the `"YOUR KEY HERE"` you will want to put the Tailscale Auth Key you generated in the previous step.
+First, save your Tailscale Auth Key to a file (this keeps the secret out of your shell history and process list):
 
 ```
-uvx community-cloud-storage create --ts-authkey "YOUR KEY HERE" --cluster-peername bootstrap --output compose.yml
+echo "YOUR KEY HERE" > ~/.ts-authkey
+chmod 600 ~/.ts-authkey
+```
+
+Then create the compose file:
+
+```
+uvx community-cloud-storage create --ts-authkey-file ~/.ts-authkey --cluster-peername bootstrap --output compose.yml
 ```
 
 This should write a Docker Compose configuration to `compose.yaml`.

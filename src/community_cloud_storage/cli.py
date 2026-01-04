@@ -13,12 +13,18 @@ def cli():
 
 @cli.command()
 @click.option("--cluster-peername", required=True)
-@click.option("--ts-authkey", required=True)
+@click.option(
+    "--ts-authkey-file",
+    type=click.Path(exists=True, path_type=Path),
+    required=True,
+    help="Path to file containing Tailscale auth key",
+)
 @click.option("--output", type=click.File("w"), default="-")
-def create(output: TextIOWrapper, cluster_peername: str, ts_authkey: str):
+def create(output: TextIOWrapper, cluster_peername: str, ts_authkey_file: Path):
     """
     Create a new community-cloud-storage Docker Compose file.
     """
+    ts_authkey = ts_authkey_file.read_text().strip()
     compose.create(output, cluster_peername=cluster_peername, ts_authkey=ts_authkey)
 
 
