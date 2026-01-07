@@ -3,10 +3,46 @@ import os
 import shlex
 import socket
 import subprocess
+from datetime import datetime, timezone
 from io import TextIOWrapper
 from pathlib import Path
 
 import yaml
+
+DEFAULT_CONFIG_PATH = Path.home() / ".ccs" / "config.yml"
+
+
+def load_config(config_path: Path = None) -> dict:
+    """
+    Load cluster config from YAML file.
+    Default: ~/.ccs/config.yml
+    Returns dict with basic_auth_user, basic_auth_password, etc.
+    """
+    path = config_path or DEFAULT_CONFIG_PATH
+    if not path.exists():
+        raise FileNotFoundError(f"Config file not found: {path}")
+
+    with open(path) as f:
+        config = yaml.safe_load(f)
+
+    # Flatten cluster config for convenience
+    result = {}
+    if "cluster" in config:
+        result["basic_auth_user"] = config["cluster"].get("basic_auth_user")
+        result["basic_auth_password"] = config["cluster"].get("basic_auth_password")
+    if "default_node" in config:
+        result["default_node"] = config["default_node"]
+
+    return result
+
+
+def get_basic_auth_string(config: dict) -> str:
+    """Build basic auth string from config dict."""
+    user = config.get("basic_auth_user")
+    password = config.get("basic_auth_password")
+    if user and password:
+        return f"{user}:{password}"
+    return None
 
 
 def _get_env_value(env_list: list, prefix: str) -> str:
@@ -209,39 +245,91 @@ def compose_text(
     return yaml.dump(doc)
 
 
-def add(path: Path, host: str) -> str:
+def _cluster_ctl_base(host: str, basic_auth: str = None) -> str:
+    """Build base ipfs-cluster-ctl command with host and optional auth."""
+    cmd = f"ipfs-cluster-ctl --host /dns4/{host}/tcp/9094"
+    if basic_auth:
+        cmd += f" --basic-auth {basic_auth} --force-http"
+    return cmd
+
+
+def add(path: Path, host: str, basic_auth: str = None, cid_manifest: Path = None) -> dict:
     """
     Add a given file or directory to the cluster.
+
+    Returns dict with:
+    - root_cid: CID of the top-level item
+    - root_path: original path name
+    - added_at: ISO timestamp
+    - cluster_peername: host used
+    - entries: list of {path, cid} dicts
+    - complete: bool indicating if add fully succeeded
     """
-    cmd = f"ipfs-cluster-ctl --host /dns4/{host}/tcp/9094 add"
+    base_cmd = _cluster_ctl_base(host, basic_auth)
+    cmd = f"{base_cmd} add --enc json"
 
     if path.is_dir():
         cmd += " --recursive"
 
     cmd += f" {path}"
 
-    return run(cmd)
+    result = {
+        "root_cid": None,
+        "root_path": path.name,
+        "added_at": datetime.now(timezone.utc).isoformat(),
+        "cluster_peername": host,
+        "entries": [],
+        "complete": False,
+    }
+
+    try:
+        output = run(cmd)
+        # ipfs-cluster-ctl add --enc json outputs one JSON object per line
+        for line in output.strip().split("\n"):
+            if line:
+                entry = json.loads(line)
+                result["entries"].append({
+                    "path": entry.get("name", ""),
+                    "cid": entry.get("cid", ""),
+                })
+        # Last entry is the root directory/file
+        if result["entries"]:
+            result["root_cid"] = result["entries"][-1]["cid"]
+        result["complete"] = True
+    except Exception as e:
+        # Partial failure - return what we have
+        result["error"] = str(e)
+
+    # Write manifest if requested
+    if cid_manifest:
+        with open(cid_manifest, "w") as f:
+            json.dump(result, f, indent=2)
+
+    return result
 
 
-def status(cid: str, host: str) -> str:
+def status(cid: str, host: str, basic_auth: str = None) -> str:
     """
-    Add a given file or directory to the cluster.
+    Get status of a CID in the cluster.
     """
-    return run(f"ipfs-cluster-ctl --host /dns4/{host}/tcp/9094 status {cid}")
+    base_cmd = _cluster_ctl_base(host, basic_auth)
+    return run(f"{base_cmd} status {cid}")
 
 
-def ls(host: str) -> str:
+def ls(host: str, basic_auth: str = None) -> str:
     """
     List CIDs that are pinned in the cluster.
     """
-    return run(f"ipfs-cluster-ctl --host /dns4/{host}/tcp/9094 pin ls")
+    base_cmd = _cluster_ctl_base(host, basic_auth)
+    return run(f"{base_cmd} pin ls")
 
 
-def rm(cid: str, host: str) -> str:
+def rm(cid: str, host: str, basic_auth: str = None) -> str:
     """
     Remove a CID from the cluster.
     """
-    return run(f"ipfs-cluster-ctl --host /dns4/{host}/tcp/9094 pin rm {cid}")
+    base_cmd = _cluster_ctl_base(host, basic_auth)
+    return run(f"{base_cmd} pin rm {cid}")
 
 
 def get(cid: str, host: str, output: Path) -> str:

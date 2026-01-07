@@ -102,42 +102,86 @@ def set_bootstrap_peer(cluster_peername: str, bootstrap_host: str) -> None:
 
 @cli.command()
 @click.option("--cluster-peername", required=True)
+@click.option(
+    "--basic-auth-file",
+    type=click.Path(exists=True, path_type=Path),
+    help="Config file with basic auth credentials (default: ~/.ccs/config.yml)",
+)
+@click.option(
+    "--cid-manifest",
+    type=click.Path(path_type=Path),
+    help="Write CID manifest JSON to this file",
+)
 @click.argument("path", type=click.Path(exists=True, path_type=Path), required=True)
-def add(cluster_peername: str, path: Path) -> None:
+def add(cluster_peername: str, basic_auth_file: Path, cid_manifest: Path, path: Path) -> None:
     """
     Add a file or directory to the storage cluster using a peer hostname.
     """
+    config = compose.load_config(basic_auth_file)
+    basic_auth = compose.get_basic_auth_string(config)
+
     print(f"adding {path} to {cluster_peername}")
-    print(compose.add(path, host=cluster_peername))
+    result = compose.add(path, host=cluster_peername, basic_auth=basic_auth, cid_manifest=cid_manifest)
+
+    if result.get("complete"):
+        print(f"root CID: {result['root_cid']}")
+        print(f"entries: {len(result['entries'])}")
+        if cid_manifest:
+            print(f"manifest written to: {cid_manifest}")
+    else:
+        print(f"add failed or incomplete: {result.get('error', 'unknown error')}")
+        if result["entries"]:
+            print(f"partial entries: {len(result['entries'])}")
 
 
 @cli.command()
 @click.option("--cluster-peername", required=True)
+@click.option(
+    "--basic-auth-file",
+    type=click.Path(exists=True, path_type=Path),
+    help="Config file with basic auth credentials (default: ~/.ccs/config.yml)",
+)
 @click.argument("cid", required=True)
-def status(cid: str, cluster_peername: str) -> None:
+def status(cid: str, cluster_peername: str, basic_auth_file: Path) -> None:
     """
     Output the status of a CID in the cluster.
     """
-    print(compose.status(cid, host=cluster_peername))
+    config = compose.load_config(basic_auth_file)
+    basic_auth = compose.get_basic_auth_string(config)
+    print(compose.status(cid, host=cluster_peername, basic_auth=basic_auth))
 
 
 @cli.command()
 @click.option("--cluster-peername", required=True)
-def ls(cluster_peername: str) -> None:
+@click.option(
+    "--basic-auth-file",
+    type=click.Path(exists=True, path_type=Path),
+    help="Config file with basic auth credentials (default: ~/.ccs/config.yml)",
+)
+def ls(cluster_peername: str, basic_auth_file: Path) -> None:
     """
     List CIDs that are pinned in the cluster.
     """
-    print(compose.ls(host=cluster_peername))
+    config = compose.load_config(basic_auth_file)
+    basic_auth = compose.get_basic_auth_string(config)
+    print(compose.ls(host=cluster_peername, basic_auth=basic_auth))
 
 
 @cli.command()
 @click.option("--cluster-peername", required=True)
+@click.option(
+    "--basic-auth-file",
+    type=click.Path(exists=True, path_type=Path),
+    help="Config file with basic auth credentials (default: ~/.ccs/config.yml)",
+)
 @click.argument("cid", required=True)
-def rm(cid: str, cluster_peername: str) -> None:
+def rm(cid: str, cluster_peername: str, basic_auth_file: Path) -> None:
     """
     Remove a CID from the cluster.
     """
-    print(compose.rm(cid, host=cluster_peername))
+    config = compose.load_config(basic_auth_file)
+    basic_auth = compose.get_basic_auth_string(config)
+    print(compose.rm(cid, host=cluster_peername, basic_auth=basic_auth))
 
 
 @cli.command()
