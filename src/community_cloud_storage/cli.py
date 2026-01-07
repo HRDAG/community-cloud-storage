@@ -33,15 +33,48 @@ def create(output: TextIOWrapper, cluster_peername: str, ts_authkey_file: Path):
 @click.option("--input", type=click.File("r"), required=True)
 @click.option("--output", type=click.File("w"), default="-")
 @click.option("--bootstrap-host", required=True)
+@click.option(
+    "--ts-authkey-file",
+    type=click.Path(exists=True, path_type=Path),
+    required=True,
+    help="Path to file containing Tailscale auth key",
+)
+@click.option(
+    "--basic-auth",
+    help="Basic auth credentials (user:password) for cluster API",
+)
+@click.option(
+    "--ipfs-peer-id",
+    help="IPFS peer ID of bootstrap node (skips network call if provided)",
+)
+@click.option(
+    "--cluster-peer-id",
+    help="Cluster peer ID of bootstrap node (skips network call if provided)",
+)
 def clone(
-    cluster_peername: str, input: TextIOWrapper, output: TextIOWrapper, bootstrap_host: str
+    cluster_peername: str,
+    input: TextIOWrapper,
+    output: TextIOWrapper,
+    bootstrap_host: str,
+    ts_authkey_file: Path,
+    basic_auth: str,
+    ipfs_peer_id: str,
+    cluster_peer_id: str,
 ):
     """
     Use an existing compose file, and running containers, to generate a
     configuration for a new node in the cluster.
     """
+    ts_authkey = ts_authkey_file.read_text().strip()
     compose.clone(
-        input, output, cluster_peername=cluster_peername, bootstrap_host=bootstrap_host
+        input,
+        output,
+        cluster_peername=cluster_peername,
+        bootstrap_host=bootstrap_host,
+        ts_authkey=ts_authkey,
+        basic_auth=basic_auth,
+        ipfs_peer_id=ipfs_peer_id,
+        cluster_peer_id=cluster_peer_id,
     )
 
 

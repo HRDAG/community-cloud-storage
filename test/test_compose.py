@@ -70,19 +70,21 @@ def test_clone(tmp_path, monkeypatch):
 
     # create a clone of the compose file configured for a new node
     new_compose_path = tmp_path / "clone-compose.yml"
+    clone_authkey = "clone_xyz789"
 
     compose.clone(
         input=compose_path.open("r"),
         output=new_compose_path.open("w"),
         cluster_peername="clone",
         bootstrap_host="bootstrap",
+        ts_authkey=clone_authkey,
     )
 
     doc = yaml.load(new_compose_path.open("r"), Loader=yaml.Loader)
 
     assert doc["name"] == "community-cloud-storage"
     assert doc["services"]["tailscale"]["hostname"] == "clone"
-    assert doc["services"]["tailscale"]["environment"]["TS_AUTHKEY"] == "abc123def"
+    assert doc["services"]["tailscale"]["environment"]["TS_AUTHKEY"] == clone_authkey
     assert (
         doc["services"]["ipfs-cluster"]["environment"]["CLUSTER_SECRET"]
         == cluster_secret

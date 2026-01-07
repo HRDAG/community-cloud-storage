@@ -48,6 +48,10 @@ def clone(
     output: TextIOWrapper,
     cluster_peername: str,
     bootstrap_host: str,
+    ts_authkey: str,
+    basic_auth: str = None,
+    ipfs_peer_id: str = None,
+    cluster_peer_id: str = None,
 ) -> None:
     """
     This function will clone a new node based on the compose file of a bootstrap
@@ -58,10 +62,13 @@ def clone(
     - an existing compose.yml file as input
     - an output handle to write the new compose text
     - a new cluster peer name for the clone
+    - a fresh Tailscale auth key for this node
+    - optional basic auth credentials for cluster API
+    - optional ipfs_peer_id (skips network call if provided)
+    - optional cluster_peer_id (skips network call if provided)
 
     We read these values from the existing compose.yaml file since they are
     carried through unchanged:
-    - TS_AUTHKEY
     - IPFS_SWARM_KEY
     - CLUSTER_SECRET
 
@@ -74,14 +81,29 @@ def clone(
     # load the existing compose doc
     bootstrap_doc = yaml.load(input, Loader=yaml.Loader)
 
-    # talk to the running containers to get the relevant bootstrap info
+    # get tailscale IP of bootstrap host
     tailscale_ip = socket.gethostbyname(bootstrap_host)
-    ipfs_id = run(f"ipfs --api /dns/{bootstrap_host}/tcp/5001 id -f <id>")
-    ipfs_cluster = run(
-        f"ipfs-cluster-ctl --host /dns4/{bootstrap_host}/tcp/9094 --enc json id",
-        parse_json=True,
-    )
-    ipfs_cluster_id = ipfs_cluster["id"]
+
+    # get IPFS peer ID - use provided value or query the node
+    if ipfs_peer_id:
+        ipfs_id = ipfs_peer_id
+    else:
+        ipfs_id = run(f"ipfs --api /dns/{bootstrap_host}/tcp/5001 id -f <id>")
+
+    # get cluster peer ID - use provided value or query the node
+    if cluster_peer_id:
+        ipfs_cluster_id = cluster_peer_id
+    else:
+        # build ipfs-cluster-ctl command with auth if provided
+        cluster_ctl_opts = f"--host /dns4/{bootstrap_host}/tcp/9094"
+        if basic_auth:
+            cluster_ctl_opts += f" --basic-auth {basic_auth} --force-http"
+
+        ipfs_cluster = run(
+            f"ipfs-cluster-ctl {cluster_ctl_opts} --enc json id",
+            parse_json=True,
+        )
+        ipfs_cluster_id = ipfs_cluster["id"]
 
     # construct multiaddr for bootstrapping ipfs and ipfs cluster
     ipfs_cluster_bootstrap = f"/ip4/{tailscale_ip}/tcp/9096/ipfs/{ipfs_cluster_id}"
@@ -97,9 +119,7 @@ def clone(
             cluster_secret=bootstrap_doc["services"]["ipfs-cluster"]["environment"][
                 "CLUSTER_SECRET"
             ],
-            ts_authkey=bootstrap_doc["services"]["tailscale"]["environment"][
-                "TS_AUTHKEY"
-            ],
+            ts_authkey=ts_authkey,
             ipfs_bootstrap=ipfs_bootstrap,
             ipfs_cluster_bootstrap=ipfs_cluster_bootstrap,
         )
