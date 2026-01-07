@@ -53,19 +53,23 @@ def test_clone(tmp_path, monkeypatch):
     )
     assert compose_path.is_file()
 
-    # mock the lookup of a hostname and two system calls
+    # mock the lookup of a hostname
     monkeypatch.setattr(socket, "gethostbyname", lambda _: "192.168.1.15")
+
+    # mock the HTTP clients that clone() uses to get peer IDs
+    mock_ipfs_client = Mock()
+    mock_ipfs_client.id.return_value = {
+        "ID": "12D3KooWRy3uoprJ3ijtQHqwS3mUkchBXeqmwk9HhLQYwif9hD2C"
+    }
+
+    mock_cluster_client = Mock()
+    mock_cluster_client.id.return_value = {
+        "id": "12D3KooWHuxBMn6M5dqwhFpaCRpj5BXoomEq8rncbJeXpLG12qs2"
+    }
+
+    monkeypatch.setattr(compose, "_get_ipfs_client", lambda host: mock_ipfs_client)
     monkeypatch.setattr(
-        compose,
-        "run",
-        Mock(
-            side_effect=[
-                "12D3KooWRy3uoprJ3ijtQHqwS3mUkchBXeqmwk9HhLQYwif9hD2C",  # ipfs id
-                {
-                    "id": "12D3KooWHuxBMn6M5dqwhFpaCRpj5BXoomEq8rncbJeXpLG12qs2"
-                },  # ipfs cluster id
-            ]
-        ),
+        compose, "_get_cluster_client", lambda host, basic_auth=None: mock_cluster_client
     )
 
     # create a clone of the compose file configured for a new node
@@ -123,18 +127,77 @@ def test_run_error_handling():
         compose.run("false")
 
 
-def test_add_recursive_flag(tmp_path, monkeypatch):
-    commands = []
-    monkeypatch.setattr(compose, "run", lambda cmd: commands.append(cmd) or "")
+def test_add_returns_manifest(tmp_path, monkeypatch):
+    # mock the cluster client
+    mock_client = Mock()
+    mock_client.add.return_value = [
+        {"name": "file.txt", "cid": "QmTestCid123"},
+    ]
+    monkeypatch.setattr(
+        compose, "_get_cluster_client", lambda host, basic_auth=None: mock_client
+    )
 
-    # directories should get --recursive
+    # test adding a file
+    file_path = tmp_path / "file.txt"
+    file_path.write_text("test content")
+
+    result = compose.add(file_path, host="test-host")
+
+    # verify client.add was called with the path
+    mock_client.add.assert_called_once_with(file_path, recursive=True)
+
+    # verify manifest structure
+    assert result["root_cid"] == "QmTestCid123"
+    assert result["root_path"] == "file.txt"
+    assert result["cluster_peername"] == "test-host"
+    assert result["complete"] is True
+    assert len(result["entries"]) == 1
+    assert result["entries"][0]["cid"] == "QmTestCid123"
+
+
+def test_add_directory(tmp_path, monkeypatch):
+    # mock the cluster client
+    mock_client = Mock()
+    mock_client.add.return_value = [
+        {"name": "subdir/a.txt", "cid": "QmCidA"},
+        {"name": "subdir/b.txt", "cid": "QmCidB"},
+        {"name": "subdir", "cid": "QmRootCid"},
+    ]
+    monkeypatch.setattr(
+        compose, "_get_cluster_client", lambda host, basic_auth=None: mock_client
+    )
+
+    # test adding a directory
     subdir = tmp_path / "subdir"
     subdir.mkdir()
-    compose.add(subdir, host="test")
-    assert "--recursive" in commands[0]
+    (subdir / "a.txt").write_text("a")
+    (subdir / "b.txt").write_text("b")
 
-    # files should not get --recursive
+    result = compose.add(subdir, host="test-host")
+
+    # verify client.add was called
+    mock_client.add.assert_called_once_with(subdir, recursive=True)
+
+    # verify manifest has all entries with root CID last
+    assert result["root_cid"] == "QmRootCid"
+    assert result["complete"] is True
+    assert len(result["entries"]) == 3
+
+
+def test_add_error_handling(tmp_path, monkeypatch):
+    # mock the cluster client to raise an error
+    mock_client = Mock()
+    mock_client.add.side_effect = Exception("Connection refused")
+    monkeypatch.setattr(
+        compose, "_get_cluster_client", lambda host, basic_auth=None: mock_client
+    )
+
     file_path = tmp_path / "file.txt"
     file_path.write_text("test")
-    compose.add(file_path, host="test")
-    assert "--recursive" not in commands[1]
+
+    result = compose.add(file_path, host="test-host")
+
+    # verify error is captured in manifest
+    assert result["complete"] is False
+    assert "Connection refused" in result["error"]
+    assert result["entries"] == []

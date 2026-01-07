@@ -146,9 +146,12 @@ def status(cid: str, cluster_peername: str, basic_auth_file: Path) -> None:
     """
     Output the status of a CID in the cluster.
     """
+    import json
+
     config = compose.load_config(basic_auth_file)
     basic_auth = compose.get_basic_auth_string(config)
-    print(compose.status(cid, host=cluster_peername, basic_auth=basic_auth))
+    result = compose.status(cid, host=cluster_peername, basic_auth=basic_auth)
+    print(json.dumps(result, indent=2))
 
 
 @cli.command()
@@ -162,9 +165,12 @@ def ls(cluster_peername: str, basic_auth_file: Path) -> None:
     """
     List CIDs that are pinned in the cluster.
     """
+    import json
+
     config = compose.load_config(basic_auth_file)
     basic_auth = compose.get_basic_auth_string(config)
-    print(compose.ls(host=cluster_peername, basic_auth=basic_auth))
+    result = compose.ls(host=cluster_peername, basic_auth=basic_auth)
+    print(json.dumps(result, indent=2))
 
 
 @cli.command()
@@ -179,9 +185,12 @@ def rm(cid: str, cluster_peername: str, basic_auth_file: Path) -> None:
     """
     Remove a CID from the cluster.
     """
+    import json
+
     config = compose.load_config(basic_auth_file)
     basic_auth = compose.get_basic_auth_string(config)
-    print(compose.rm(cid, host=cluster_peername, basic_auth=basic_auth))
+    result = compose.rm(cid, host=cluster_peername, basic_auth=basic_auth)
+    print(json.dumps(result, indent=2))
 
 
 @cli.command()

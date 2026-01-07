@@ -120,26 +120,21 @@ def clone(
     # get tailscale IP of bootstrap host
     tailscale_ip = socket.gethostbyname(bootstrap_host)
 
-    # get IPFS peer ID - use provided value or query the node
+    # get IPFS peer ID - use provided value or query the node via HTTP API
     if ipfs_peer_id:
         ipfs_id = ipfs_peer_id
     else:
-        ipfs_id = run(f"ipfs --api /dns/{bootstrap_host}/tcp/5001 id -f <id>")
+        ipfs_client = _get_ipfs_client(bootstrap_host)
+        ipfs_info = ipfs_client.id()
+        ipfs_id = ipfs_info["ID"]
 
-    # get cluster peer ID - use provided value or query the node
+    # get cluster peer ID - use provided value or query the node via HTTP API
     if cluster_peer_id:
         ipfs_cluster_id = cluster_peer_id
     else:
-        # build ipfs-cluster-ctl command with auth if provided
-        cluster_ctl_opts = f"--host /dns4/{bootstrap_host}/tcp/9094"
-        if basic_auth:
-            cluster_ctl_opts += f" --basic-auth {basic_auth} --force-http"
-
-        ipfs_cluster = run(
-            f"ipfs-cluster-ctl {cluster_ctl_opts} --enc json id",
-            parse_json=True,
-        )
-        ipfs_cluster_id = ipfs_cluster["id"]
+        cluster_client = _get_cluster_client(bootstrap_host, basic_auth)
+        cluster_info = cluster_client.id()
+        ipfs_cluster_id = cluster_info["id"]
 
     # construct multiaddr for bootstrapping ipfs and ipfs cluster
     ipfs_cluster_bootstrap = f"/ip4/{tailscale_ip}/tcp/9096/ipfs/{ipfs_cluster_id}"
@@ -245,17 +240,28 @@ def compose_text(
     return yaml.dump(doc)
 
 
-def _cluster_ctl_base(host: str, basic_auth: str = None) -> str:
-    """Build base ipfs-cluster-ctl command with host and optional auth."""
-    cmd = f"ipfs-cluster-ctl --host /dns4/{host}/tcp/9094"
-    if basic_auth:
-        cmd += f" --basic-auth {basic_auth} --force-http"
-    return cmd
+def _get_cluster_client(host: str, basic_auth: str = None):
+    """Create a ClusterClient instance."""
+    from community_cloud_storage.cluster_api import ClusterClient
+
+    auth_tuple = None
+    if basic_auth and ":" in basic_auth:
+        user, password = basic_auth.split(":", 1)
+        auth_tuple = (user, password)
+
+    return ClusterClient(host=host, port=9094, basic_auth=auth_tuple)
+
+
+def _get_ipfs_client(host: str):
+    """Create an IPFSClient instance."""
+    from community_cloud_storage.cluster_api import IPFSClient
+
+    return IPFSClient(host=host, port=5001)
 
 
 def add(path: Path, host: str, basic_auth: str = None, cid_manifest: Path = None) -> dict:
     """
-    Add a given file or directory to the cluster.
+    Add a given file or directory to the cluster via HTTP API.
 
     Returns dict with:
     - root_cid: CID of the top-level item
@@ -265,40 +271,27 @@ def add(path: Path, host: str, basic_auth: str = None, cid_manifest: Path = None
     - entries: list of {path, cid} dicts
     - complete: bool indicating if add fully succeeded
     """
-    base_cmd = _cluster_ctl_base(host, basic_auth)
-    cmd = f"{base_cmd} add --enc json"
+    from community_cloud_storage.cluster_api import create_manifest
 
-    if path.is_dir():
-        cmd += " --recursive"
-
-    cmd += f" {path}"
-
-    result = {
-        "root_cid": None,
-        "root_path": path.name,
-        "added_at": datetime.now(timezone.utc).isoformat(),
-        "cluster_peername": host,
-        "entries": [],
-        "complete": False,
-    }
+    client = _get_cluster_client(host, basic_auth)
 
     try:
-        output = run(cmd)
-        # ipfs-cluster-ctl add --enc json outputs one JSON object per line
-        for line in output.strip().split("\n"):
-            if line:
-                entry = json.loads(line)
-                result["entries"].append({
-                    "path": entry.get("name", ""),
-                    "cid": entry.get("cid", ""),
-                })
-        # Last entry is the root directory/file
-        if result["entries"]:
-            result["root_cid"] = result["entries"][-1]["cid"]
-        result["complete"] = True
+        entries = client.add(path, recursive=True)
+        result = create_manifest(
+            path=path,
+            cluster_peername=host,
+            entries=entries,
+            complete=True,
+        )
     except Exception as e:
         # Partial failure - return what we have
-        result["error"] = str(e)
+        result = create_manifest(
+            path=path,
+            cluster_peername=host,
+            entries=[],
+            complete=False,
+            error=str(e),
+        )
 
     # Write manifest if requested
     if cid_manifest:
@@ -308,35 +301,42 @@ def add(path: Path, host: str, basic_auth: str = None, cid_manifest: Path = None
     return result
 
 
-def status(cid: str, host: str, basic_auth: str = None) -> str:
+def status(cid: str, host: str, basic_auth: str = None) -> dict:
     """
-    Get status of a CID in the cluster.
+    Get status of a CID in the cluster via HTTP API.
+
+    Returns dict with pin status.
     """
-    base_cmd = _cluster_ctl_base(host, basic_auth)
-    return run(f"{base_cmd} status {cid}")
+    client = _get_cluster_client(host, basic_auth)
+    return client.pin_status(cid)
 
 
-def ls(host: str, basic_auth: str = None) -> str:
+def ls(host: str, basic_auth: str = None) -> list:
     """
-    List CIDs that are pinned in the cluster.
+    List CIDs that are pinned in the cluster via HTTP API.
+
+    Returns list of pin status objects.
     """
-    base_cmd = _cluster_ctl_base(host, basic_auth)
-    return run(f"{base_cmd} pin ls")
+    client = _get_cluster_client(host, basic_auth)
+    return client.pins()
 
 
-def rm(cid: str, host: str, basic_auth: str = None) -> str:
+def rm(cid: str, host: str, basic_auth: str = None) -> dict:
     """
-    Remove a CID from the cluster.
+    Remove a CID from the cluster via HTTP API.
+
+    Returns removed pin info.
     """
-    base_cmd = _cluster_ctl_base(host, basic_auth)
-    return run(f"{base_cmd} pin rm {cid}")
+    client = _get_cluster_client(host, basic_auth)
+    return client.unpin(cid)
 
 
-def get(cid: str, host: str, output: Path) -> str:
+def get(cid: str, host: str, output: Path) -> None:
     """
-    Get a CID from the cluster and write to output path.
+    Get a CID from IPFS and write to output path via HTTP API.
     """
-    run(f"ipfs --api /dns/{host}/tcp/5001 get --output {output} {cid}")
+    client = _get_ipfs_client(host)
+    client.get(cid, output)
 
 
 def run(cmd, parse_json=False) -> str:
