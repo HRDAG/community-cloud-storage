@@ -48,12 +48,9 @@ Thanks to TRANSFERArchive's [DATA.TRUST] project for the example of using IPFS C
 
 ## Install
 
-First, install the `ipfs` and `ipfs-cluster-ctl` command line utilities, and make sure they are in your system path. You don't need to run the cluster on your workstation, however having these utilities available makes it easy for the `community-cloud-storage` command line tool to talk to running nodes.
-
-* `ipfs`: https://docs.ipfs.tech/install/command-line/#install-official-binary-distributions
-* `ipfs-cluster-ctl`: https://dist.ipfs.tech/#ipfs-cluster-ctl
-
 You will want to install [Docker] on whatever machine you are planning to run your node on.
+
+**Note:** As of v0.4.0, `community-cloud-storage` communicates directly with IPFS Cluster and IPFS via HTTP APIs. You do NOT need to install `ipfs` or `ipfs-cluster-ctl` on your workstation.
 
 You will also need to install the `community-cloud-storage` utility which helps create the Docker compose file for the bootstrap node and then clone that for subsequent nodes in your network.
 
@@ -174,7 +171,7 @@ So if you created a node called *bootstrap* you should be able to visit *http:bo
 
 ## Command Line
 
-The community-cloud-storage utility also offers some functionality to add and remove content from storage. These are really just wrappers around the `ipfs-cluster-ctl` command, which you can choose to use directly of course.
+The community-cloud-storage utility offers functionality to add and remove content from storage via the IPFS Cluster HTTP API.
 
 ### Adding Content
 
