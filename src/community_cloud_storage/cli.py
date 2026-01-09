@@ -1,9 +1,57 @@
 from io import TextIOWrapper
 from pathlib import Path
+import re
+import sys
 
 import click
+import requests
 
 from community_cloud_storage import compose
+from community_cloud_storage.cluster_api import ClusterAPIError
+
+
+def validate_peername(ctx, param, value):
+    """Validate that cluster-peername looks like a valid hostname."""
+    if value is None:
+        return value
+    if value.startswith("--"):
+        raise click.BadParameter(
+            f"'{value}' looks like a flag, not a hostname. "
+            f"Did you forget to provide a value for --cluster-peername?"
+        )
+    # Basic hostname validation (alphanumeric, hyphens, dots)
+    if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9\-\.]*$", value):
+        raise click.BadParameter(
+            f"'{value}' doesn't look like a valid hostname"
+        )
+    return value
+
+
+def handle_api_error(func):
+    """Decorator to catch API and connection errors."""
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except ClusterAPIError as e:
+            click.echo(f"Error: Cluster API error: {e}", err=True)
+            sys.exit(1)
+        except requests.exceptions.ConnectionError as e:
+            # Extract host from error message if possible
+            msg = str(e)
+            click.echo(f"Error: Could not connect to cluster", err=True)
+            if "host=" in msg:
+                import re
+                match = re.search(r"host='([^']+)'", msg)
+                if match:
+                    click.echo(f"  Host: {match.group(1)}", err=True)
+            click.echo("  Check --cluster-peername value (e.g., nas-ccs, meerkat-ccs)", err=True)
+            sys.exit(1)
+        except requests.exceptions.RequestException as e:
+            click.echo(f"Error: Network error: {e}", err=True)
+            sys.exit(1)
+    wrapper.__name__ = func.__name__
+    wrapper.__doc__ = func.__doc__
+    return wrapper
 
 
 @click.group()
@@ -12,7 +60,7 @@ def cli():
 
 
 @cli.command()
-@click.option("--cluster-peername", required=True)
+@click.option("--cluster-peername", required=True, callback=validate_peername)
 @click.option(
     "--ts-authkey-file",
     type=click.Path(exists=True, path_type=Path),
@@ -29,7 +77,7 @@ def create(output: TextIOWrapper, cluster_peername: str, ts_authkey_file: Path):
 
 
 @cli.command()
-@click.option("--cluster-peername", required=True)
+@click.option("--cluster-peername", required=True, callback=validate_peername)
 @click.option("--input", type=click.File("r"), required=True)
 @click.option("--output", type=click.File("w"), default="-")
 @click.option("--bootstrap-host", required=True)
@@ -79,7 +127,7 @@ def clone(
 
 
 @cli.command()
-@click.option("--cluster-peername", required=True)
+@click.option("--cluster-peername", required=True, callback=validate_peername)
 def reset_bootstrap_peers(cluster_peername: str) -> None:
     """
     Reset the bootstrap peers for a given node in the cluster. Useful on first
@@ -89,7 +137,7 @@ def reset_bootstrap_peers(cluster_peername: str) -> None:
 
 
 @cli.command()
-@click.option("--cluster-peername", required=True)
+@click.option("--cluster-peername", required=True, callback=validate_peername)
 @click.option("--bootstrap-host", required=True)
 def set_bootstrap_peer(cluster_peername: str, bootstrap_host: str) -> None:
     """
@@ -101,7 +149,7 @@ def set_bootstrap_peer(cluster_peername: str, bootstrap_host: str) -> None:
 
 
 @cli.command()
-@click.option("--cluster-peername", required=True)
+@click.option("--cluster-peername", required=True, callback=validate_peername)
 @click.option(
     "--basic-auth-file",
     type=click.Path(exists=True, path_type=Path),
@@ -113,6 +161,7 @@ def set_bootstrap_peer(cluster_peername: str, bootstrap_host: str) -> None:
     help="Write CID manifest JSON to this file",
 )
 @click.argument("path", type=click.Path(exists=True, path_type=Path), required=True)
+@handle_api_error
 def add(cluster_peername: str, basic_auth_file: Path, cid_manifest: Path, path: Path) -> None:
     """
     Add a file or directory to the storage cluster using a peer hostname.
@@ -135,13 +184,14 @@ def add(cluster_peername: str, basic_auth_file: Path, cid_manifest: Path, path: 
 
 
 @cli.command()
-@click.option("--cluster-peername", required=True)
+@click.option("--cluster-peername", required=True, callback=validate_peername)
 @click.option(
     "--basic-auth-file",
     type=click.Path(exists=True, path_type=Path),
     help="Config file with basic auth credentials (default: ~/.ccs/config.yml)",
 )
 @click.argument("cid", required=True)
+@handle_api_error
 def status(cid: str, cluster_peername: str, basic_auth_file: Path) -> None:
     """
     Output the status of a CID in the cluster.
@@ -155,12 +205,13 @@ def status(cid: str, cluster_peername: str, basic_auth_file: Path) -> None:
 
 
 @cli.command()
-@click.option("--cluster-peername", required=True)
+@click.option("--cluster-peername", required=True, callback=validate_peername)
 @click.option(
     "--basic-auth-file",
     type=click.Path(exists=True, path_type=Path),
     help="Config file with basic auth credentials (default: ~/.ccs/config.yml)",
 )
+@handle_api_error
 def ls(cluster_peername: str, basic_auth_file: Path) -> None:
     """
     List CIDs that are pinned in the cluster.
@@ -174,13 +225,14 @@ def ls(cluster_peername: str, basic_auth_file: Path) -> None:
 
 
 @cli.command()
-@click.option("--cluster-peername", required=True)
+@click.option("--cluster-peername", required=True, callback=validate_peername)
 @click.option(
     "--basic-auth-file",
     type=click.Path(exists=True, path_type=Path),
     help="Config file with basic auth credentials (default: ~/.ccs/config.yml)",
 )
 @click.argument("cid", required=True)
+@handle_api_error
 def rm(cid: str, cluster_peername: str, basic_auth_file: Path) -> None:
     """
     Remove a CID from the cluster.
@@ -195,8 +247,9 @@ def rm(cid: str, cluster_peername: str, basic_auth_file: Path) -> None:
 
 @cli.command()
 @click.argument("cid", required=True)
-@click.option("--cluster-peername", required=True)
+@click.option("--cluster-peername", required=True, callback=validate_peername)
 @click.option("--output", type=click.Path(exists=False, path_type=Path), required=True)
+@handle_api_error
 def get(cid: str, cluster_peername: str, output: Path) -> None:
     """
     Get contents of a file and write to STDOUT or a file.
