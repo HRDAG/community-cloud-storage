@@ -96,34 +96,34 @@ class ClusterClient:
         response = self._request("DELETE", f"/pins/{cid}")
         return response.json()
 
-    def add(self, path: Path, recursive: bool = True) -> list:
+    def add(self, path: Path, recursive: bool = True, name: str = None) -> list:
         """
         Add a file or directory to the cluster.
 
         Args:
             path: Path to file or directory
             recursive: If True and path is directory, add recursively
+            name: Pin name for cluster metadata (defaults to filename/dirname)
 
         Returns:
             List of dicts with 'name' and 'cid' for each added item.
             Last item is the root CID.
         """
-        results = []
+        if name is None:
+            name = path.name
 
         if path.is_file():
-            results = self._add_file(path)
+            return self._add_file(path, name)
         elif path.is_dir() and recursive:
-            results = self._add_directory(path)
+            return self._add_directory(path, name)
         else:
             raise ValueError(f"Path {path} is not a file or directory")
 
-        return results
-
-    def _add_file(self, path: Path) -> list:
+    def _add_file(self, path: Path, name: str) -> list:
         """Add a single file."""
         with open(path, "rb") as f:
             files = {"file": (path.name, f)}
-            response = self._request("POST", "/add", files=files)
+            response = self._request("POST", f"/add?name={name}", files=files)
 
         # Response is newline-delimited JSON
         results = []
@@ -133,7 +133,7 @@ class ClusterClient:
                 results.append(json.loads(line))
         return results
 
-    def _add_directory(self, path: Path) -> list:
+    def _add_directory(self, path: Path, name: str) -> list:
         """Add a directory recursively using multipart form."""
         # Collect all files with their relative paths
         files_to_add = []
@@ -155,7 +155,7 @@ class ClusterClient:
                 file_handles.append(fh)
                 files.append(("file", (rel_path, fh)))
 
-            response = self._request("POST", "/add", files=files)
+            response = self._request("POST", f"/add?name={name}", files=files)
         finally:
             for fh in file_handles:
                 fh.close()
