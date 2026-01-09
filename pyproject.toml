@@ -15,7 +15,8 @@ packages = ["community_cloud_storage"]
 repository = "https://github.com/historypin/community-cloud-storage"
 
 [project.scripts]
-community-cloud-storage = "community_cloud_storage:cli"
+community-cloud-storage = "community_cloud_storage.cli:cli"
+ccs = "community_cloud_storage.cli:cli"
 
 [dependency-groups]
 dev = [
