@@ -333,10 +333,15 @@ def rm(cid: str, host: str, basic_auth: str = None) -> dict:
 
 def get(cid: str, host: str, output: Path) -> None:
     """
-    Get a CID from IPFS and write to output path via HTTP API.
+    Get a CID from IPFS gateway and write to output path.
     """
-    client = _get_ipfs_client(host)
-    client.get(cid, output)
+    import requests
+    url = f"http://{host}:8080/ipfs/{cid}"
+    response = requests.get(url, stream=True)
+    response.raise_for_status()
+    with open(output, "wb") as f:
+        for chunk in response.iter_content(chunk_size=8192):
+            f.write(chunk)
 
 
 def run(cmd, parse_json=False) -> str:

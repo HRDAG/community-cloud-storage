@@ -74,6 +74,8 @@ class ClusterClient:
         Returns list of pin status objects.
         """
         response = self._request("GET", "/pins")
+        if response.status_code == 204 or not response.text:
+            return []
         return response.json()
 
     def pin_status(self, cid: str) -> dict:
