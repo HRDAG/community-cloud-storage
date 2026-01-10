@@ -56,8 +56,7 @@ def _get_env_value(env_list: list, prefix: str) -> str:
 def create(
     output: TextIOWrapper,
     cluster_peername: str,
-    ts_authkey: str,
-    cluster_secret: str = None,  # these will be gereated if not passed in
+    cluster_secret: str = None,  # these will be generated if not passed in
     ipfs_swarm_key: str = None,  # but are useful to define when testing
 ) -> None:
     """
@@ -74,7 +73,6 @@ def create(
             cluster_peername=cluster_peername,
             ipfs_swarm_key=ipfs_swarm_key,
             cluster_secret=cluster_secret,
-            ts_authkey=ts_authkey,
         )
     )
 
@@ -84,21 +82,17 @@ def clone(
     output: TextIOWrapper,
     cluster_peername: str,
     bootstrap_host: str,
-    ts_authkey: str,
     basic_auth: str = None,
     ipfs_peer_id: str = None,
     cluster_peer_id: str = None,
 ) -> None:
     """
-    This function will clone a new node based on the compose file of a bootstrap
-    node, and the IDs that can be retrieved by talking to the bootstrap host
-    using the ipfs and ipfs-cluster-ctl command (which must be installed).
+    Clone a new node based on the compose file of a bootstrap node.
 
     We need to be given:
     - an existing compose.yml file as input
     - an output handle to write the new compose text
     - a new cluster peer name for the clone
-    - a fresh Tailscale auth key for this node
     - optional basic auth credentials for cluster API
     - optional ipfs_peer_id (skips network call if provided)
     - optional cluster_peer_id (skips network call if provided)
@@ -109,7 +103,7 @@ def clone(
     - CLUSTER_SECRET
 
     And we generate these new environment variables by talking to the running
-    bootstrap host to get its Tailscale IP and the IPFS IDs:
+    bootstrap host to get its IP and the IPFS IDs:
     - IPFS_BOOTSTRAP
     - IPFS_CLUSTER_BOOTSTRAP
     """
@@ -117,8 +111,8 @@ def clone(
     # load the existing compose doc
     bootstrap_doc = yaml.load(input, Loader=yaml.Loader)
 
-    # get tailscale IP of bootstrap host
-    tailscale_ip = socket.gethostbyname(bootstrap_host)
+    # get IP of bootstrap host
+    bootstrap_ip = socket.gethostbyname(bootstrap_host)
 
     # get IPFS peer ID - use provided value or query the node via HTTP API
     if ipfs_peer_id:
@@ -137,8 +131,8 @@ def clone(
         ipfs_cluster_id = cluster_info["id"]
 
     # construct multiaddr for bootstrapping ipfs and ipfs cluster
-    ipfs_cluster_bootstrap = f"/ip4/{tailscale_ip}/tcp/9096/ipfs/{ipfs_cluster_id}"
-    ipfs_bootstrap = f"/ip4/{tailscale_ip}/tcp/4001/ipfs/{ipfs_id}"
+    ipfs_cluster_bootstrap = f"/ip4/{bootstrap_ip}/tcp/9096/ipfs/{ipfs_cluster_id}"
+    ipfs_bootstrap = f"/ip4/{bootstrap_ip}/tcp/4001/ipfs/{ipfs_id}"
 
     # write out the compose text for the clone!
     output.write(
@@ -150,7 +144,6 @@ def clone(
             cluster_secret=bootstrap_doc["services"]["ipfs-cluster"]["environment"][
                 "CLUSTER_SECRET"
             ],
-            ts_authkey=ts_authkey,
             ipfs_bootstrap=ipfs_bootstrap,
             ipfs_cluster_bootstrap=ipfs_cluster_bootstrap,
         )
@@ -195,7 +188,6 @@ def set_bootstrap_peer(cluster_peername: str, bootstrap_host: str) -> None:
 
 def compose_text(
     cluster_peername,
-    ts_authkey,
     ipfs_swarm_key,
     cluster_secret,
     ipfs_bootstrap=None,
@@ -205,8 +197,6 @@ def compose_text(
     template_path = Path(__file__).parent / "compose.yml"
     doc = yaml.load(template_path.open("r"), Loader=yaml.Loader)
 
-    doc["services"]["tailscale"]["hostname"] = cluster_peername
-    doc["services"]["tailscale"]["environment"]["TS_AUTHKEY"] = ts_authkey
     doc["services"]["ipfs-cluster"]["environment"]["CLUSTER_PEERNAME"] = (
         cluster_peername
     )

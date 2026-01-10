@@ -13,23 +13,24 @@ This guide explains how to deploy CCS (Community Cloud Storage) nodes using Dock
 
 ## Architecture Overview
 
-Each CCS node runs three containers:
+Each CCS node runs two containers with host networking:
 
 | Container | Purpose |
 |-----------|---------|
-| `tailscale` | VPN networking, gives node a hostname on tailnet |
 | `ipfs` | IPFS daemon (kubo) - content storage |
 | `ipfs-cluster` | Cluster coordination - replication, pinning |
+
+**Note:** Nodes use host networking and assume the host machine is already on a tailnet (or other private network). No tailscale container is included - machines must be on the tailnet before deploying CCS.
 
 ### Port Reference
 
 | Port | Service | Purpose | Access |
 |------|---------|---------|--------|
-| 4001 | IPFS | Swarm (peer-to-peer replication) | Tailnet (CCS nodes) |
+| 4001 | IPFS | Swarm (peer-to-peer replication) | Tailnet only |
 | 5001 | IPFS | API (read/write) | Localhost only |
 | 8080 | IPFS | Gateway (read-only HTTP) | Tailnet |
 | 9094 | Cluster | REST API (add/rm/ls/status) | Tailnet + basic auth |
-| 9096 | Cluster | Swarm (cluster peer-to-peer) | Tailnet (CCS nodes) |
+| 9096 | Cluster | Swarm (cluster peer-to-peer) | Tailnet only |
 
 **Security notes:**
 - Port 5001 is hardened to localhost only via `CLUSTER_IPFSHTTP_NODEMULTIADDRESS` in compose template
@@ -50,11 +51,7 @@ CCS uses two secrets that must be identical across all nodes in a cluster:
 ## Prerequisites
 
 1. **Docker** installed on target machine
-2. **Tailscale/Headscale auth key**
-   - For Headscale: get from your Headscale admin (e.g., `https://hs.hrdag.org`)
-   - For Tailscale: get from https://login.tailscale.com/admin/settings/keys
-   - Use a reusable key for multiple nodes
-   - Save to a file (e.g., `~/.ts-authkey`)
+2. **Host on private network** - Machine must already be on tailnet (or other private network where nodes can reach each other)
 3. **CCS installed** on your workstation (run `./install.sh`)
 4. **Config file** at `~/.ccs/config.yml` with cluster credentials:
    ```yaml
@@ -71,24 +68,10 @@ The first node in the cluster generates the shared secrets.
 
 ```bash
 # Generate compose.yml for bootstrap node
+# Use your machine's tailnet hostname as --cluster-peername
 ccs create \
-  --cluster-peername nas-ccs \
-  --ts-authkey-file ~/.ts-authkey \
+  --cluster-peername nas \
   --output compose.yml
-```
-
-### Edit compose.yml for Headscale (if applicable):
-
-If using Headscale instead of Tailscale, add `TS_EXTRA_ARGS` to the tailscale service:
-
-```yaml
-services:
-  tailscale:
-    environment:
-      TS_AUTHKEY: ...
-      TS_STATE_DIR: /var/lib/tailscale
-      TS_USERSPACE: false
-      TS_EXTRA_ARGS: --login-server=https://hs.hrdag.org  # Add this line
 ```
 
 ### On the target machine:
@@ -110,7 +93,7 @@ docker compose up -d
 docker compose ps
 
 # From your workstation, verify cluster responds
-ccs ls --cluster-peername nas-ccs --basic-auth-file ~/.ccs/config.yml
+ccs ls --cluster-peername nas --basic-auth-file ~/.ccs/config.yml
 ```
 
 ## Step 2: Add Nodes to Cluster
@@ -129,9 +112,8 @@ Then clone config for the new node:
 
 ```bash
 ccs clone \
-  --cluster-peername meerkat-ccs \
-  --bootstrap-host nas-ccs \
-  --ts-authkey-file ~/.ts-authkey \
+  --cluster-peername meerkat \
+  --bootstrap-host nas \
   --basic-auth admin:yourpassword \
   --input nas-compose.yml \
   --output meerkat-compose.yml
@@ -142,10 +124,6 @@ The `clone` command:
 2. Queries the bootstrap node for its peer IDs via HTTP API
 3. Generates bootstrap multiaddrs so the new node can find the cluster
 4. Writes a new compose.yml with all the right values
-
-### Edit for Headscale (if applicable):
-
-Add `TS_EXTRA_ARGS` to the tailscale service as shown above.
 
 ### On the target machine:
 
@@ -163,7 +141,7 @@ sudo docker compose up -d  # sudo required if user not in docker group
 
 ```bash
 # From your workstation - should show both peers in peer_map
-ccs ls --cluster-peername nas-ccs --basic-auth-file ~/.ccs/config.yml
+ccs ls --cluster-peername nas --basic-auth-file ~/.ccs/config.yml
 ```
 
 ## Directory Structure on Nodes
@@ -172,8 +150,7 @@ ccs ls --cluster-peername nas-ccs --basic-auth-file ~/.ccs/config.yml
 /path/to/ccs/
 ├── compose.yml          # Docker compose config (contains secrets!)
 ├── ipfs/                # IPFS data (blocks, datastore)
-├── ipfs-cluster/        # Cluster state (pins, peer info)
-└── tailscale/           # Tailscale state
+└── ipfs-cluster/        # Cluster state (pins, peer info)
 ```
 
 **Important:** The `compose.yml` contains secrets (`CLUSTER_SECRET`, `IPFS_SWARM_KEY`, `CLUSTER_RESTAPI_BASICAUTHCREDENTIALS`). Protect it with appropriate permissions (e.g., `chmod 600`).
@@ -186,8 +163,8 @@ After setup, verify port 5001 is not accessible from the network:
 
 ```bash
 # Should fail with "connection refused"
-curl -m 5 -X POST http://nas-ccs:5001/api/v0/id
-curl -m 5 -X POST http://meerkat-ccs:5001/api/v0/id
+curl -m 5 -X POST http://nas:5001/api/v0/id
+curl -m 5 -X POST http://meerkat:5001/api/v0/id
 ```
 
 This is enforced by `CLUSTER_IPFSHTTP_NODEMULTIADDRESS: /ip4/127.0.0.1/tcp/5001` in the compose template.
@@ -198,10 +175,10 @@ This is enforced by `CLUSTER_IPFSHTTP_NODEMULTIADDRESS: /ip4/127.0.0.1/tcp/5001`
 
 ```bash
 # Check cluster peers via ccs
-ccs ls --cluster-peername nas-ccs --basic-auth-file ~/.ccs/config.yml
+ccs ls --cluster-peername nas --basic-auth-file ~/.ccs/config.yml
 
 # If peer_map shows only one node, manually add bootstrap peer
-ccs set-bootstrap-peer --cluster-peername meerkat-ccs --bootstrap-host nas-ccs
+ccs set-bootstrap-peer --cluster-peername meerkat --bootstrap-host nas
 ```
 
 ### Reset bootstrap peers
@@ -209,13 +186,13 @@ ccs set-bootstrap-peer --cluster-peername meerkat-ccs --bootstrap-host nas-ccs
 If a node has stale peer info:
 
 ```bash
-ccs reset-bootstrap-peers --cluster-peername meerkat-ccs
+ccs reset-bootstrap-peers --cluster-peername meerkat
 ```
 
 ### Check replication status
 
 ```bash
-ccs status <CID> --cluster-peername nas-ccs --basic-auth-file ~/.ccs/config.yml
+ccs status <CID> --cluster-peername nas --basic-auth-file ~/.ccs/config.yml
 ```
 
 Look for `"status": "pinned"` on each peer. Status `"pinning"` means replication is in progress.
@@ -237,11 +214,11 @@ docker compose up -d
 
 ```bash
 # Create bootstrap node config
-ccs create --cluster-peername NAME --ts-authkey-file FILE --output compose.yml
+ccs create --cluster-peername NAME --output compose.yml
 
 # Clone config for new node
 ccs clone --cluster-peername NAME --bootstrap-host BOOTSTRAP \
-  --ts-authkey-file FILE --basic-auth USER:PASS \
+  --basic-auth USER:PASS \
   --input bootstrap-compose.yml --output new-compose.yml
 
 # Start containers

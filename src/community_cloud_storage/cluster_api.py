@@ -7,6 +7,7 @@ eliminating the need for ipfs-cluster-ctl binary.
 API Reference: https://ipfscluster.io/documentation/reference/api/
 """
 
+import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -72,11 +73,17 @@ class ClusterClient:
         List all pinned CIDs.
 
         Returns list of pin status objects.
+        Note: Cluster API returns NDJSON (newline-delimited JSON).
         """
         response = self._request("GET", "/pins")
         if response.status_code == 204 or not response.text:
             return []
-        return response.json()
+        # Parse NDJSON - each line is a separate JSON object
+        results = []
+        for line in response.text.strip().split('\n'):
+            if line:
+                results.append(json.loads(line))
+        return results
 
     def pin_status(self, cid: str) -> dict:
         """

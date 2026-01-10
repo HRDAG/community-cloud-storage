@@ -26,12 +26,10 @@ In a nutshell, the goal of *community-cloud-storage* is to provide an alternativ
   directly with each other using a virtual private mesh network, that only they
   can see.
 
-*community-cloud-storage* is really just a Docker Compose configuration for reliably bringing up Docker services that allows a network of community-cloud-storage instances to talk to each other. The containers are:
+*community-cloud-storage* is really just a Docker Compose configuration for reliably bringing up Docker services that allows a network of community-cloud-storage instances to talk to each other. The containers use host networking and assume machines are already on a private network (e.g., Tailscale/Headscale tailnet):
 
-* *tailscale*: a Tailscale client that establishes your node's connection to other trusted nodes in the mesh network.
-* *ipfs*: an IPFS daemon running on the Tailscale network.
-* *ipfs-cluster*: an IPFS Cluster daemon configured to talk to the IPFS service using the Tailscale network.
-* *ui*: a single-page web application served up by nginx which talks to the IPFS Cluster API
+* *ipfs*: an IPFS daemon (kubo) for content storage
+* *ipfs-cluster*: an IPFS Cluster daemon for replication and pinning coordination
 
 Of course it's not all rainbows and unicorns, there are tradeoffs to this approach:
 
@@ -88,33 +86,16 @@ These settings are just to get you started with your storage cluster. You can fu
 
 Be sure to also mention that any admins should get invited to the Tailscale so they can see it from their workstation.
 
-### Tailscale Auth Key
+### Add Machine to Tailnet
 
-You will need to create an Authorization Key to use in your community-cloud-storage configuration so that new containers can join the private network. To do this click on *Settings* in the top menu, and then *Keys* in the menu to the left. Here you click on *Generate auth key* button and enter:
-
-* a description for your storage network (e.g. my-storage)
-* make the key *reusable*
-* set the maximum of 90 days for the expiration which should be plenty of time to set up your network
-* not ephemeral (allows your node to go offline and come back up again)
-* tags: add the *container* tag
-* click the *Generate Key* button
-* copy the new key, and save it somewhere private where you can find it again
+Before setting up CCS, ensure your machine is on the Tailscale network. Use the Tailscale client on the host machine (not in Docker) to join your tailnet. This gives the machine a hostname on the private network that other nodes can reach.
 
 ### Create Compose File
 
-Use your Tailscale token to create your bootstrap node, which here is named `bootstrap` but can be whatever you like. This will be the hostname of the bootstrap node in your Tailscale network.
-
-First, save your Tailscale Auth Key to a file (this keeps the secret out of your shell history and process list):
+Create the compose file for your bootstrap node. The `--cluster-peername` should match your machine's hostname on the tailnet:
 
 ```
-echo "YOUR KEY HERE" > ~/.ts-authkey
-chmod 600 ~/.ts-authkey
-```
-
-Then create the compose file:
-
-```
-uvx community-cloud-storage create --ts-authkey-file ~/.ts-authkey --cluster-peername bootstrap --output compose.yml
+uvx community-cloud-storage create --cluster-peername bootstrap --output compose.yml
 ```
 
 This should write a Docker Compose configuration to `compose.yaml`.
@@ -137,10 +118,10 @@ $ docker compose stop
 
 ### Let Others Join
 
-In order to let others join the network you will need to share a modified version of the compose file with them via a secure channel (e.g. WhatsApp or Signal).
+In order to let others join the network you will need to share a modified version of the compose file with them via a secure channel (e.g. WhatsApp or Signal). The new node's machine must already be on the tailnet.
 
 ```
-uvx community-cloud-storage clone --input compose.yml --cluster-peername acme --output acme-compose.yml --bootstrap-host bootstrap
+uvx community-cloud-storage clone --input compose.yml --cluster-peername acme --bootstrap-host bootstrap --output acme-compose.yml
 ```
 
 This will write out a `acme-compose.yml` file which you can share via a secure channel with someone running a machine at that organization.
@@ -149,25 +130,20 @@ You should be able to run this using `docker compose`, but for the original Shif
 
 For people with a QNAP you can:
 
-1. Install Container Station from Apps if it's not already available.
-2. Open Container Station.
-3. Click `Applications` option in the menu on the left.
-4. Click the `Create` button.
-5. In the Application Name box enter `community-cloud-storage`
-6. Paste the contents of the supplied `compose.yml` file into the text box.
-7. Click the `create` button.
-8. Click the `Containers` option in the menu on the left.
-9. Verify that you see three containers running.
+1. Ensure the QNAP is on the tailnet first (install Tailscale from Apps).
+2. Install Container Station from Apps if it's not already available.
+3. Open Container Station.
+4. Click `Applications` option in the menu on the left.
+5. Click the `Create` button.
+6. In the Application Name box enter `community-cloud-storage`
+7. Paste the contents of the supplied `compose.yml` file into the text box.
+8. Click the `create` button.
+9. Click the `Containers` option in the menu on the left.
+10. Verify that you see two containers running (ipfs and ipfs-cluster).
 
 ## Working With Storage
 
-*community-cloud-storage* includes a lightweight web UI that can be accessed from any trusted device on the Tailscale network—your phone, a laptop across town, or remote workstations around the world. As long as the device is authorized in the community’s tailnet, you can upload, browse what’s stored, check cluster health, and download files without needing to be physically on the same LAN as any node. File deletion remains intentionally restricted to the command line, ensuring that only admins with direct node access can permanently remove data from the cluster.
-
-If you have added your workstation to the Tailnet (see the *Add Device* in the *Machines* tab of the Tailscale Admin) you should be able to see the community-cloud-storage-ui web interface at the node's host name. Each node is running the same web application that is able to communicate to its IPFS Cluster node.
-
-So if you created a node called *bootstrap* you should be able to visit *http:bootstrap* in your browser and see this interface, which lets you add content to the cluster, see how it has been replicated, and download it.
-
-<img src="https://github.com/historypin/community-cloud-storage/raw/main/images/ui.png?raw=true">
+*community-cloud-storage* is operated via the command line interface. As long as your workstation is on the tailnet, you can manage storage on any node in the cluster.
 
 ## Command Line
 

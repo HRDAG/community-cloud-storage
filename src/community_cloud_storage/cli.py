@@ -61,19 +61,12 @@ def cli():
 
 @cli.command()
 @click.option("--cluster-peername", required=True, callback=validate_peername)
-@click.option(
-    "--ts-authkey-file",
-    type=click.Path(exists=True, path_type=Path),
-    required=True,
-    help="Path to file containing Tailscale auth key",
-)
 @click.option("--output", type=click.File("w"), default="-")
-def create(output: TextIOWrapper, cluster_peername: str, ts_authkey_file: Path):
+def create(output: TextIOWrapper, cluster_peername: str):
     """
     Create a new community-cloud-storage Docker Compose file.
     """
-    ts_authkey = ts_authkey_file.read_text().strip()
-    compose.create(output, cluster_peername=cluster_peername, ts_authkey=ts_authkey)
+    compose.create(output, cluster_peername=cluster_peername)
 
 
 @cli.command()
@@ -81,12 +74,6 @@ def create(output: TextIOWrapper, cluster_peername: str, ts_authkey_file: Path):
 @click.option("--input", type=click.File("r"), required=True)
 @click.option("--output", type=click.File("w"), default="-")
 @click.option("--bootstrap-host", required=True)
-@click.option(
-    "--ts-authkey-file",
-    type=click.Path(exists=True, path_type=Path),
-    required=True,
-    help="Path to file containing Tailscale auth key",
-)
 @click.option(
     "--basic-auth",
     help="Basic auth credentials (user:password) for cluster API",
@@ -104,7 +91,6 @@ def clone(
     input: TextIOWrapper,
     output: TextIOWrapper,
     bootstrap_host: str,
-    ts_authkey_file: Path,
     basic_auth: str,
     ipfs_peer_id: str,
     cluster_peer_id: str,
@@ -113,13 +99,11 @@ def clone(
     Use an existing compose file, and running containers, to generate a
     configuration for a new node in the cluster.
     """
-    ts_authkey = ts_authkey_file.read_text().strip()
     compose.clone(
         input,
         output,
         cluster_peername=cluster_peername,
         bootstrap_host=bootstrap_host,
-        ts_authkey=ts_authkey,
         basic_auth=basic_auth,
         ipfs_peer_id=ipfs_peer_id,
         cluster_peer_id=cluster_peer_id,

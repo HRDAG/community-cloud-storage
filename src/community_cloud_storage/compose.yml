@@ -1,31 +1,17 @@
 name: community-cloud-storage
 
 services:
-  tailscale:
-    image: tailscale/tailscale:latest
-    hostname: ${CLUSTER_PEERNAME}
-    environment:
-      TS_AUTHKEY: ${TS_AUTHKEY}
-      TS_STATE_DIR: /var/lib/tailscale
-      TS_USERSPACE: false
-    volumes:
-      - tailscale:/var/lib/tailscale
-    devices:
-      - /dev/net/tun:/dev/net/tun
-    cap_add:
-      - net_admin
-    restart: unless-stopped
-
   ipfs:
-    image: ipfs/kubo:v0.36.0 # pinned because of https://github.com/historypin/community-cloud-storage/issues/2
+    image: ipfs/kubo:v0.36.0
+    network_mode: host
     environment:
     volumes:
       - ipfs:/data/ipfs
-    network_mode: service:tailscale
     restart: unless-stopped
-    
+
   ipfs-cluster:
     image: ipfs/ipfs-cluster:latest
+    network_mode: host
     depends_on:
       - ipfs
     environment:
@@ -37,11 +23,8 @@ services:
       CLUSTER_MONITORPINGINTERVAL: 2s
     volumes:
       - ipfs-cluster:/data/ipfs-cluster
-      - ./incoming:/incoming
-    network_mode: service:tailscale
     restart: unless-stopped
 
 volumes:
   ipfs:
   ipfs-cluster:
-  tailscale:
