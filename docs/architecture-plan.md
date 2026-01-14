@@ -15,6 +15,36 @@ This document describes the target architecture for Community Cloud Storage (CCS
 
 ---
 
+## 0. Implementation Status
+
+**Last updated:** 2026-01-13
+
+### Completed
+- [x] Architecture plan written and approved
+- [x] Host networking refactor (removed tailscale container)
+- [x] NDJSON parsing fix in cluster_api.py
+- [x] CCS code updated: replication settings in compose template
+- [x] CCS code updated: `--node-role` and `--node-org` CLI options
+- [x] Cluster state documented (peer IDs captured)
+
+### Current Cluster State
+| Node | Cluster Peer ID | Tailnet IP | Status |
+|------|-----------------|------------|--------|
+| nas | `12D3KooWRwzo72ZsiP5Hnfn2kGoi9f2u8AcQBozEP8MPVhpSqeLQ` | 100.64.0.31 | Running, needs config update |
+| meerkat | `12D3KooWFCXpnVGGTk3ykyMTnkSpoesCS5KFeJEQ37Nw1xFuRzGn` | 100.64.0.4 | Running, needs config update |
+| chll | — | — | Not yet deployed |
+| pihost | — | — | Not yet deployed |
+| ipfs1 | — | — | Not yet deployed |
+
+### In Progress
+- [ ] Ansible role creation (pulled forward from Phase 3)
+- [ ] Deploy updated config to nas and meerkat via ansible
+
+### Key Decision: Ansible-Driven Deployment
+During Phase 1 implementation, we decided to pull ansible integration forward. Instead of CCS generating compose files and manually deploying, **ansible is now the single source of truth** for all node configuration. See Section 4.1 for details.
+
+---
+
 ## 1. Goals
 
 ### 1.1 Primary Goal
@@ -287,42 +317,120 @@ For each real org coming online:
 
 **Goal:** Configure existing cluster (nas, meerkat) properly, add remaining test nodes.
 
+**Key change:** Ansible integration pulled forward. All deployment is now ansible-driven.
+
 **Tasks:**
 
-1.1. **Document current cluster state**
-   - Capture peer IDs from nas and meerkat
-   - Check current replication settings
-   - Verify `disable_repinning` setting
+1.1. ✅ **Document current cluster state** (DONE)
+   - Captured peer IDs from nas and meerkat
+   - Verified current settings (no replication factors, repinning disabled by default)
 
-1.2. **Update cluster configuration on nas and meerkat**
-   - Set `replication_factor_min: 2`
-   - Set `replication_factor_max: 3`
-   - Set `disable_repinning: false`
-   - Configure allocator: `allocate_by: ["tag:role", "tag:org", "freespace"]`
-   - Restart ipfs-cluster containers
+1.2. ✅ **Update CCS code with new settings** (DONE)
+   - Added `CLUSTER_REPLICATIONFACTORMIN: "2"` to compose template
+   - Added `CLUSTER_REPLICATIONFACTORMAX: "3"` to compose template
+   - Added `CLUSTER_DISABLEREPINNING: "false"` to compose template
+   - Added `--node-role` and `--node-org` CLI options
+   - Added `CLUSTER_INFORMER_TAGS_TAGS` env var for tags
 
-1.3. **Add node tags**
+1.3. 🔄 **Create ansible role for CCS deployment** (IN PROGRESS)
+   - Ansible templates compose.yml (not CCS python code)
+   - All node-specific config in ansible inventory
+   - Secrets in ansible-vault
+   - See `../hrdag-ansible/docs/ccs-role-requirements.md`
+
+1.4. **Deploy to existing nodes via ansible**
    - nas: `role=primary`, `org=hrdag`
    - meerkat: `role=primary`, `org=test-orgB`
+   - Verify replication settings applied
+   - Capture peer IDs to inventory
 
-1.4. **Add remaining test nodes to cluster**
-   - Deploy CCS to chll (backup role)
-   - Deploy CCS to pihost (primary, test-orgC)
-   - Deploy CCS to ipfs1 (primary, test-orgD)
-   - Capture all peer IDs
-
-1.5. **Create ansible playbook for CCS deployment**
-   - Service user setup
-   - Docker + compose deployment
-   - Cluster config patching
-   - Node tagging
-   - Peer ID capture
+1.5. **Add remaining test nodes via ansible**
+   - chll: `role=backup`, `org=shared`
+   - pihost: `role=primary`, `org=test-orgC`
+   - ipfs1: `role=primary`, `org=test-orgD`
 
 **Deliverables:**
+- Ansible role: `ccs` in hrdag-ansible
 - 5-node test cluster running
 - All nodes tagged correctly
 - Replication and rebalancing enabled
-- Ansible playbook for future deployments
+- Peer IDs in ansible inventory
+
+### 4.1 Ansible-Driven Deployment Model
+
+**Rationale:** During Phase 1, we discovered that manually patching compose files doesn't scale. Each node has different volume paths, and secrets were scattered. We pulled ansible integration forward to establish a single source of truth.
+
+**Before (CCS-generated compose):**
+```
+ccs create/clone → compose.yml → scp to node → docker compose up
+```
+- CCS python code generates compose.yml with baked-in values
+- Volume paths hardcoded per-node
+- Secrets scattered in compose files on each node
+- Manual deployment
+
+**After (Ansible-driven compose):**
+```
+ansible-playbook ccs-deploy.yml -l nas → compose.yml templated → deployed
+```
+- Ansible inventory holds all node config (host_vars)
+- Ansible templates compose.yml using jinja2
+- Secrets in ansible-vault (single location)
+- Reproducible, automated deployment
+
+**Responsibility split:**
+
+| Task | Owner |
+|------|-------|
+| IPFS Cluster API library | CCS python (this repo) |
+| CLI for daily ops (add, ls, status) | CCS python (this repo) |
+| compose.yml template | hrdag-ansible |
+| Docker installation | hrdag-ansible |
+| Secrets management (vault) | hrdag-ansible |
+| Peer ID capture | hrdag-ansible |
+| Node deployment | hrdag-ansible |
+
+**CCS python code does NOT generate compose files anymore** — that's ansible's job.
+
+**Deprecated CCS commands:** `ccs create` and `ccs clone` still exist but are vestigial. Use ansible for all deployments.
+
+**Ansible inventory structure:**
+```
+hrdag-ansible/
+  inventory/
+    group_vars/
+      ccs_nodes.yml           # Cluster-wide: secrets, replication settings
+    host_vars/
+      nas.yml                 # Node-specific: volume_path, role, org, peer_id
+      meerkat.yml
+      chll.yml
+      pihost.yml
+      ipfs1.yml
+  roles/
+    ccs/
+      templates/compose.yml.j2
+      tasks/main.yml
+```
+
+**Example host_vars/nas.yml:**
+```yaml
+ccs_cluster_peername: nas-ccs
+ccs_volume_path: /mnt/hrdag-nas/ccs
+ccs_node_role: primary
+ccs_node_org: hrdag
+ccs_peer_id: 12D3KooWRwzo72ZsiP5Hnfn2kGoi9f2u8AcQBozEP8MPVhpSqeLQ  # captured after deploy
+```
+
+**Example group_vars/ccs_nodes.yml (vaulted):**
+```yaml
+ccs_cluster_secret: !vault |
+  $ANSIBLE_VAULT;1.1;AES256
+  ...
+ccs_ipfs_swarm_key: !vault |
+  ...
+ccs_basic_auth_password: !vault |
+  ...
+```
 
 ### Phase 2: CCS CLI Updates (Next Sprint)
 
@@ -375,44 +483,28 @@ For each real org coming online:
 
 ### Phase 3: Ansible Integration (Following Sprint)
 
-**Goal:** Write requirements document for hrdag-ansible; implementation is that repo's responsibility.
+**Status:** PULLED FORWARD into Phase 1. Core ansible role is now part of Phase 1.
+
+**Remaining Phase 3 work:** Polish and documentation after initial deployment works.
 
 **Tasks:**
 
-3.1. **Write requirements document: `../hrdag-ansible/docs/ccs-role-requirements.md`**
-   Requirements for CCS ansible role:
-   - Install Docker if not present
-   - Deploy compose.yml from template
-   - Configure cluster settings via environment variables
-   - Apply node tags (role, org)
-   - Capture peer ID after container starts
-   - Write peer ID to `~/.ccs/config.yml` on admin workstations
+3.1. ~~Write requirements document~~ → Moved to Phase 1.3
 
-3.2. **Specify inventory structure requirements**
-   ```
-   inventory/
-     group_vars/
-       ccs_nodes.yml       # cluster-wide settings (secrets, replication factors)
-     host_vars/
-       nas.yml             # role=primary, org=hrdag, peer_id=...
-       chll.yml            # role=backup, org=shared, peer_id=...
-       meerkat.yml         # role=primary, org=test-orgB, peer_id=...
-   ```
-
-3.3. **Specify required playbooks**
-   - `ccs-deploy.yml` — Full deployment to new node
-   - `ccs-configure.yml` — Update config on existing nodes
+3.2. **Add operational playbooks** (after basic deploy works)
+   - `ccs-configure.yml` — Update config on existing nodes without full redeploy
    - `ccs-retag.yml` — Change node tags (for transitions)
-   - `ccs-sync-config.yml` — Push peer IDs to admin workstation configs
+   - `ccs-sync-config.yml` — Push peer IDs to admin workstation `~/.ccs/config.yml`
 
-3.4. **Specify workflow documentation needed**
+3.3. **Document ansible workflows**
    - Adding a new org
    - Transitioning test node to real org
    - Removing a node safely
+   - Rotating secrets
 
 **Deliverables:**
-- Requirements document: `../hrdag-ansible/docs/ccs-role-requirements.md`
-- hrdag-ansible team implements based on requirements
+- Operational playbooks beyond basic deploy
+- Workflow documentation in hrdag-ansible
 
 ### Phase 4: Production Onboarding (Ongoing)
 
@@ -580,14 +672,15 @@ Periodic job to verify:
 IPFS Cluster supports environment variable overrides:
 
 ```yaml
-# In compose.yml
+# In compose.yml (or ansible template)
 environment:
   CLUSTER_REPLICATIONFACTORMIN: "2"
   CLUSTER_REPLICATIONFACTORMAX: "3"
   CLUSTER_DISABLEREPINNING: "false"
+  CLUSTER_INFORMER_TAGS_TAGS: '{"role": "primary", "org": "hrdag"}'
 ```
 
-For tags, may need to patch `service.json` directly (TBD).
+Tags are set via `CLUSTER_INFORMER_TAGS_TAGS` as a JSON string. Confirmed working in CCS code.
 
 ## Appendix B: Useful Commands
 

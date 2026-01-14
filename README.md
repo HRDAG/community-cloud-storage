@@ -46,145 +46,111 @@ Thanks to TRANSFERArchive's [DATA.TRUST] project for the example of using IPFS C
 
 ## Install
 
-You will want to install [Docker] on whatever machine you are planning to run your node on.
+### For Operators (Daily Use)
 
-**Note:** As of v0.4.0, `community-cloud-storage` communicates directly with IPFS Cluster and IPFS via HTTP APIs. You do NOT need to install `ipfs` or `ipfs-cluster-ctl` on your workstation.
+Install the `ccs` command-line tool to add, list, and retrieve files from an existing cluster.
 
-You will also need to install the `community-cloud-storage` utility which helps create the Docker compose file for the bootstrap node and then clone that for subsequent nodes in your network.
-
-The preferred way to run `community-cloud-storage` is with the `uvx` utility from [uv]. uv makes it easy to run Python utilities without needing to download and install them, or even have Python available.
+The preferred way to run `community-cloud-storage` is with the `uvx` utility from [uv]:
 
 ```
 uvx community-cloud-storage
 ```
 
-Alternatively, you can install community-cloud-storage using Python's package manager with:
+Alternatively, install with pip:
 
 ```
 pip install community-cloud-storage
 ```
 
-The rest of the documentation uses examples with `uvx` but if you install with `pip` you should be able to remove that part of the command.
+You'll also need:
+1. Access to the Tailscale network (tailnet) where the cluster runs
+2. A config file at `~/.ccs/config.yml` with cluster credentials
 
-## Setup Bootstrap Node
+### For Administrators (Deployment)
 
-*Note: if you are creating a community-cloud-storage node in an existing network jump down to the [Let Others Join](#let-others-join) section below.*
+Node deployment is managed by Ansible. See:
+- `docs/architecture-plan.md` — Overall architecture and implementation phases
+- `hrdag-ansible/docs/ccs-role-requirements.md` — Ansible role requirements
 
-The first node in a *community-cloud-storage* network is known as the bootstrap node. It requires a bit more setup than subsequent nodes because the Tailscale mesh network needs to be created and configured, and a couple secret keys need to be defined. This bootstrap node will be used by subsequent nodes to find the rest of the network when they join.
+The `ccs create` and `ccs clone` commands still exist but are deprecated. Use Ansible for all node deployments.
 
-### Tailscale
+## Tailscale Setup
 
-Your IPFS Cluster will run in a virtual private mesh network using Tailscale. Tailscale is a service for the open source Wireguard software. Creating a Tailscale account will give you access to the free tier which will be fine for your network. If you are interested in learning more about Tailscale they have a good series of instructional videos such as [Tailscale: Get Started in 10 minutes](https://www.youtube.com/watch?v=sPdvyR7bLqI).
+Your IPFS Cluster runs in a virtual private mesh network using Tailscale. Tailscale is a service built on open source Wireguard. The free tier is sufficient for most clusters.
 
-After you create your account, you will need to ensure that the access rules allow the nodes in your cluster to talk to each other. Tailscale gives you a great deal of control over these rules but a useful place to start is to simply allow all the user and devices to see each other. To do this go to your Access Control tab in Tailscale admin and use the Visual Editor to ensure it has a rule that allows all users and devices in your tailnet to see each other. 
+**Setup steps:**
+
+1. Create a Tailscale account at [tailscale.com](https://tailscale.com/)
+2. Configure access rules to allow cluster nodes to communicate (Access Control → Visual Editor → allow all users/devices)
+3. Install Tailscale on each machine that will run a CCS node
+4. Install Tailscale on admin workstations that need CLI access
+
+For detailed Tailscale setup, see their [getting started guide](https://www.youtube.com/watch?v=sPdvyR7bLqI).
 
 <img src="https://github.com/historypin/community-cloud-storage/raw/main/images/tailscale-01.png?raw=true">
 
-These settings are just to get you started with your storage cluster. You can further refine them as needed as you develop your cluster and use Tailscale for other things.
-
 <img src="https://github.com/historypin/community-cloud-storage/raw/main/images/tailscale-02.png?raw=true">
-
-Be sure to also mention that any admins should get invited to the Tailscale so they can see it from their workstation.
-
-### Add Machine to Tailnet
-
-Before setting up CCS, ensure your machine is on the Tailscale network. Use the Tailscale client on the host machine (not in Docker) to join your tailnet. This gives the machine a hostname on the private network that other nodes can reach.
-
-### Create Compose File
-
-Create the compose file for your bootstrap node. The `--cluster-peername` should match your machine's hostname on the tailnet:
-
-```
-uvx community-cloud-storage create --cluster-peername bootstrap --output compose.yml
-```
-
-This should write a Docker Compose configuration to `compose.yaml`.
-
-**DANGER: Be careful to not make this compose file public since it contains secret keys!**
-
-### Start Bootstrap
-
-You can now start up your bootstrap node with:
-
-```bash
-$ docker compose up -d
-```
-
-If you want to stop the service at any time you can execute this command, as long as you are in the `community-cloud-storage` directory:
-
-```
-$ docker compose stop
-```
-
-### Let Others Join
-
-In order to let others join the network you will need to share a modified version of the compose file with them via a secure channel (e.g. WhatsApp or Signal). The new node's machine must already be on the tailnet.
-
-```
-uvx community-cloud-storage clone --input compose.yml --cluster-peername acme --bootstrap-host bootstrap --output acme-compose.yml
-```
-
-This will write out a `acme-compose.yml` file which you can share via a secure channel with someone running a machine at that organization.
-
-You should be able to run this using `docker compose`, but for the original Shift-FFDW project we have been standardizing on partners using a [QNAP NAS](https://www.qnap.com/en-us/product/tbs-h574tx) which makes is easy to set up. You can use whatever device you want as long as you can run Docker on it and it has at least 4GB of memory (more couldn't hurt).
-
-For people with a QNAP you can:
-
-1. Ensure the QNAP is on the tailnet first (install Tailscale from Apps).
-2. Install Container Station from Apps if it's not already available.
-3. Open Container Station.
-4. Click `Applications` option in the menu on the left.
-5. Click the `Create` button.
-6. In the Application Name box enter `community-cloud-storage`
-7. Paste the contents of the supplied `compose.yml` file into the text box.
-8. Click the `create` button.
-9. Click the `Containers` option in the menu on the left.
-10. Verify that you see two containers running (ipfs and ipfs-cluster).
 
 ## Working With Storage
 
-*community-cloud-storage* is operated via the command line interface. As long as your workstation is on the tailnet, you can manage storage on any node in the cluster.
+Once your workstation is on the tailnet and you have `~/.ccs/config.yml` configured, you can manage storage on any node in the cluster.
 
-## Command Line
+### Configuration
 
-The community-cloud-storage utility offers functionality to add and remove content from storage via the IPFS Cluster HTTP API.
+Create `~/.ccs/config.yml`:
+
+```yaml
+cluster:
+  basic_auth_user: admin
+  basic_auth_password: <your-password>
+```
 
 ### Adding Content
 
 Add a file:
 
-```
-uvx community-cloud-storage add --cluster-peername acme my-file.pdf
+```bash
+ccs add --cluster-peername nas --basic-auth-file ~/.ccs/config.yml my-file.pdf
 ```
 
-or a directory:
+Or a directory:
 
+```bash
+ccs add --cluster-peername nas --basic-auth-file ~/.ccs/config.yml my-directory/
 ```
-uvx community-cloud-storage add --cluster-peername acme my-directory/
+
+### Listing Pins
+
+List all CIDs pinned in the cluster:
+
+```bash
+ccs ls --cluster-peername nas --basic-auth-file ~/.ccs/config.yml
 ```
 
 ### Checking Status
 
-See what the status of a given CID is in the cluster:
+See replication status of a specific CID:
 
-```
-uvx community-cloud-storage status --cluster-peername acme <cid>
+```bash
+ccs status <CID> --cluster-peername nas --basic-auth-file ~/.ccs/config.yml
 ```
 
-### Get a CID
+### Retrieving Content
 
-Fetch a CID and store as a local file:
+Fetch a CID and save to a local file:
 
+```bash
+ccs get <CID> --cluster-peername nas --output /path/to/file
 ```
-uvx community-cloud-storage get --cluster-peername acme --output /path/to/file <cid>
-```
+
+Note: `get` uses the IPFS gateway (port 8080) and does not require authentication.
 
 ### Removing Content
 
 Remove a CID from the cluster:
 
-```
-uvx community-cloud-storage rm --cluster-peername acme <cid>
+```bash
+ccs rm <CID> --cluster-peername nas --basic-auth-file ~/.ccs/config.yml
 ```
 
 [uv]: https://docs.astral.sh/uv/getting-started/installation/

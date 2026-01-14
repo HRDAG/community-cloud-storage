@@ -30,7 +30,7 @@ docs/workflow.md
 Upload a file from your local machine to the cluster:
 
 ```bash
-ccs add --cluster-peername nas-ccs --basic-auth-file ~/.ccs/config.yml /path/to/file
+ccs add --cluster-peername nas --basic-auth-file ~/.ccs/config.yml /path/to/file
 ```
 
 Output:
@@ -47,7 +47,7 @@ The file is uploaded via HTTP to the cluster API and automatically replicated to
 Verify a file is pinned and replicated:
 
 ```bash
-ccs status <CID> --cluster-peername nas-ccs --basic-auth-file ~/.ccs/config.yml
+ccs status <CID> --cluster-peername nas --basic-auth-file ~/.ccs/config.yml
 ```
 
 Look for `"status": "pinned"` on each node in `peer_map`.
@@ -57,7 +57,7 @@ Look for `"status": "pinned"` on each node in `peer_map`.
 List all CIDs pinned in the cluster:
 
 ```bash
-ccs ls --cluster-peername nas-ccs --basic-auth-file ~/.ccs/config.yml
+ccs ls --cluster-peername nas --basic-auth-file ~/.ccs/config.yml
 ```
 
 ## Retrieving Files
@@ -65,7 +65,7 @@ ccs ls --cluster-peername nas-ccs --basic-auth-file ~/.ccs/config.yml
 Download a file by CID:
 
 ```bash
-ccs get <CID> --cluster-peername nas-ccs --output /path/to/output
+ccs get <CID> --cluster-peername nas --output /path/to/output
 ```
 
 Note: `get` uses the IPFS gateway (port 8080) and does not require authentication.
@@ -75,7 +75,7 @@ Note: `get` uses the IPFS gateway (port 8080) and does not require authenticatio
 Unpin a CID from the cluster:
 
 ```bash
-ccs rm <CID> --cluster-peername nas-ccs --basic-auth-file ~/.ccs/config.yml
+ccs rm <CID> --cluster-peername nas --basic-auth-file ~/.ccs/config.yml
 ```
 
 ## Example Session
@@ -85,28 +85,31 @@ ccs rm <CID> --cluster-peername nas-ccs --basic-auth-file ~/.ccs/config.yml
 echo "Hello from CCS" > /tmp/test.txt
 
 # Add to cluster
-ccs add --cluster-peername nas-ccs --basic-auth-file ~/.ccs/config.yml /tmp/test.txt
+ccs add --cluster-peername nas --basic-auth-file ~/.ccs/config.yml /tmp/test.txt
 # → root CID: QmXYZ...
 
 # Check replication
-ccs status QmXYZ... --cluster-peername nas-ccs --basic-auth-file ~/.ccs/config.yml
-# → pinned on nas-ccs AND meerkat-ccs
+ccs status QmXYZ... --cluster-peername nas --basic-auth-file ~/.ccs/config.yml
+# → pinned on nas-ccs AND meerkat
 
 # Retrieve from cluster
-ccs get QmXYZ... --cluster-peername nas-ccs --output /tmp/retrieved.txt
+ccs get QmXYZ... --cluster-peername nas --output /tmp/retrieved.txt
 cat /tmp/retrieved.txt
 # → Hello from CCS
 
 # Clean up
-ccs rm QmXYZ... --cluster-peername nas-ccs --basic-auth-file ~/.ccs/config.yml
+ccs rm QmXYZ... --cluster-peername nas --basic-auth-file ~/.ccs/config.yml
 ```
 
 ## Cluster Nodes
 
-| Node | Tailnet Hostname | Role |
-|------|------------------|------|
-| nas-ccs | nas-ccs | Bootstrap node |
-| meerkat-ccs | meerkat-ccs | Replica node |
+| Node | Tailnet Hostname | Role | Org |
+|------|------------------|------|-----|
+| nas | nas | Primary | hrdag |
+| meerkat | meerkat | Primary | test-orgB |
+| chll | chll | Backup | shared |
+
+See `docs/architecture-plan.md` for full cluster topology.
 
 ## Ports
 

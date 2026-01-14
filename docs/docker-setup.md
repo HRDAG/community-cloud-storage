@@ -9,6 +9,10 @@ docs/docker-setup.md
 
 # Docker Compose Setup Guide
 
+> **DEPRECATED (2026-01-13):** Node deployment is now managed by Ansible.
+> See `hrdag-ansible/docs/ccs-role-requirements.md` for the current deployment approach.
+> This document is kept for historical reference only.
+
 This guide explains how to deploy CCS (Community Cloud Storage) nodes using Docker Compose.
 
 ## Architecture Overview

@@ -58,6 +58,8 @@ def create(
     cluster_peername: str,
     cluster_secret: str = None,  # these will be generated if not passed in
     ipfs_swarm_key: str = None,  # but are useful to define when testing
+    node_role: str = None,  # e.g., "primary", "backup", "overflow"
+    node_org: str = None,  # e.g., "hrdag", "test-orgB"
 ) -> None:
     """
     Create a new compose.yml for a new cluster. This node will act as a
@@ -73,6 +75,8 @@ def create(
             cluster_peername=cluster_peername,
             ipfs_swarm_key=ipfs_swarm_key,
             cluster_secret=cluster_secret,
+            node_role=node_role,
+            node_org=node_org,
         )
     )
 
@@ -85,6 +89,8 @@ def clone(
     basic_auth: str = None,
     ipfs_peer_id: str = None,
     cluster_peer_id: str = None,
+    node_role: str = None,
+    node_org: str = None,
 ) -> None:
     """
     Clone a new node based on the compose file of a bootstrap node.
@@ -96,6 +102,8 @@ def clone(
     - optional basic auth credentials for cluster API
     - optional ipfs_peer_id (skips network call if provided)
     - optional cluster_peer_id (skips network call if provided)
+    - optional node_role for allocation tags (e.g., "primary", "backup")
+    - optional node_org for allocation tags (e.g., "hrdag", "test-orgB")
 
     We read these values from the existing compose.yaml file since they are
     carried through unchanged:
@@ -146,6 +154,8 @@ def clone(
             ],
             ipfs_bootstrap=ipfs_bootstrap,
             ipfs_cluster_bootstrap=ipfs_cluster_bootstrap,
+            node_role=node_role,
+            node_org=node_org,
         )
     )
 
@@ -192,6 +202,8 @@ def compose_text(
     cluster_secret,
     ipfs_bootstrap=None,
     ipfs_cluster_bootstrap=None,
+    node_role=None,
+    node_org=None,
 ):
     # read in the compose template
     template_path = Path(__file__).parent / "compose.yml"
@@ -224,6 +236,19 @@ def compose_text(
     if ipfs_cluster_bootstrap:
         doc["services"]["ipfs-cluster"]["environment"]["CLUSTER_PEERADDRESSES"] = (
             ipfs_cluster_bootstrap
+        )
+
+    # add node tags for allocation (role and org)
+    if node_role or node_org:
+        tags = {}
+        if node_role:
+            tags["role"] = node_role
+        if node_org:
+            tags["org"] = node_org
+        # IPFS Cluster expects tags as JSON string in this env var
+        import json
+        doc["services"]["ipfs-cluster"]["environment"]["CLUSTER_INFORMER_TAGS_TAGS"] = (
+            json.dumps(tags)
         )
 
     # return the serialized yaml

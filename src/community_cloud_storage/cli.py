@@ -62,11 +62,25 @@ def cli():
 @cli.command()
 @click.option("--cluster-peername", required=True, callback=validate_peername)
 @click.option("--output", type=click.File("w"), default="-")
-def create(output: TextIOWrapper, cluster_peername: str):
+@click.option(
+    "--node-role",
+    type=click.Choice(["primary", "backup", "overflow"]),
+    help="Node role for allocation (primary, backup, overflow)",
+)
+@click.option(
+    "--node-org",
+    help="Organization tag for allocation (e.g., hrdag, test-orgB)",
+)
+def create(output: TextIOWrapper, cluster_peername: str, node_role: str, node_org: str):
     """
     Create a new community-cloud-storage Docker Compose file.
     """
-    compose.create(output, cluster_peername=cluster_peername)
+    compose.create(
+        output,
+        cluster_peername=cluster_peername,
+        node_role=node_role,
+        node_org=node_org,
+    )
 
 
 @cli.command()
@@ -86,6 +100,15 @@ def create(output: TextIOWrapper, cluster_peername: str):
     "--cluster-peer-id",
     help="Cluster peer ID of bootstrap node (skips network call if provided)",
 )
+@click.option(
+    "--node-role",
+    type=click.Choice(["primary", "backup", "overflow"]),
+    help="Node role for allocation (primary, backup, overflow)",
+)
+@click.option(
+    "--node-org",
+    help="Organization tag for allocation (e.g., hrdag, test-orgB)",
+)
 def clone(
     cluster_peername: str,
     input: TextIOWrapper,
@@ -94,6 +117,8 @@ def clone(
     basic_auth: str,
     ipfs_peer_id: str,
     cluster_peer_id: str,
+    node_role: str,
+    node_org: str,
 ):
     """
     Use an existing compose file, and running containers, to generate a
@@ -107,6 +132,8 @@ def clone(
         basic_auth=basic_auth,
         ipfs_peer_id=ipfs_peer_id,
         cluster_peer_id=cluster_peer_id,
+        node_role=node_role,
+        node_org=node_org,
     )
 
 

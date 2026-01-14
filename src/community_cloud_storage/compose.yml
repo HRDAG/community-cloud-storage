@@ -21,6 +21,10 @@ services:
       CLUSTER_CRDT_TRUSTEDPEERS: '*'
       CLUSTER_RESTAPI_HTTPLISTENMULTIADDRESS: /ip4/0.0.0.0/tcp/9094
       CLUSTER_MONITORPINGINTERVAL: 2s
+      # Replication settings
+      CLUSTER_REPLICATIONFACTORMIN: "2"
+      CLUSTER_REPLICATIONFACTORMAX: "3"
+      CLUSTER_DISABLEREPINNING: "false"
     volumes:
       - ipfs-cluster:/data/ipfs-cluster
     restart: unless-stopped

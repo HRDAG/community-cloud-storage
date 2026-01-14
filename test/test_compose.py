@@ -199,3 +199,50 @@ def test_add_error_handling(tmp_path, monkeypatch):
     assert result["complete"] is False
     assert "Connection refused" in result["error"]
     assert result["entries"] == []
+
+
+def test_create_with_node_tags(tmp_path):
+    """Test that node_role and node_org are added to compose environment."""
+    import json
+
+    compose_path = tmp_path / "compose.yml"
+
+    compose.create(
+        output=compose_path.open("w"),
+        cluster_peername="nas",
+        node_role="primary",
+        node_org="hrdag",
+    )
+
+    doc = yaml.load(compose_path.open("r"), Loader=yaml.Loader)
+    env = doc["services"]["ipfs-cluster"]["environment"]
+
+    # check tags are set
+    assert "CLUSTER_INFORMER_TAGS_TAGS" in env
+    tags = json.loads(env["CLUSTER_INFORMER_TAGS_TAGS"])
+    assert tags["role"] == "primary"
+    assert tags["org"] == "hrdag"
+
+    # check replication settings are in template
+    assert env["CLUSTER_REPLICATIONFACTORMIN"] == "2"
+    assert env["CLUSTER_REPLICATIONFACTORMAX"] == "3"
+    assert env["CLUSTER_DISABLEREPINNING"] == "false"
+
+
+def test_create_without_node_tags(tmp_path):
+    """Test that compose works without tags (backward compatible)."""
+    compose_path = tmp_path / "compose.yml"
+
+    compose.create(
+        output=compose_path.open("w"),
+        cluster_peername="test",
+    )
+
+    doc = yaml.load(compose_path.open("r"), Loader=yaml.Loader)
+    env = doc["services"]["ipfs-cluster"]["environment"]
+
+    # no tags should be present
+    assert "CLUSTER_INFORMER_TAGS_TAGS" not in env
+
+    # but replication settings should still be there
+    assert env["CLUSTER_REPLICATIONFACTORMIN"] == "2"
