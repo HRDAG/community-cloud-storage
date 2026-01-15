@@ -290,6 +290,8 @@ class PinStatus:
 
     def is_fully_pinned(self) -> bool:
         """True if all allocated peers have status 'pinned'."""
+        if not self.allocations:
+            return False
         for peer_id in self.allocations:
             if peer_id not in self.peer_map:
                 return False

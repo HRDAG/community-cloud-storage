@@ -112,7 +112,11 @@ def add(
         - 2 (RC_FAILED): No entries added (API/network error)
         - 3 (RC_CONFIG_ERROR): Configuration error (missing profile, peer_id, etc.)
     """
-    target_host = host or config.default_node
+    # Default to profile's primary node - enables local=true to include it in allocations
+    # Fall back to config.default_node if profile not found (will error later)
+    profile_config = config.profiles.get(profile)
+    profile_primary = profile_config.primary if profile_config else None
+    target_host = host or profile_primary or config.default_node
 
     # Check path exists
     if not path.exists():

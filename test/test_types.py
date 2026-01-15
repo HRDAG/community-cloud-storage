@@ -226,6 +226,21 @@ class TestPinStatus:
         )
         assert status.is_fully_pinned() is True
 
+    def test_is_fully_pinned_empty_allocations(self):
+        """Bug fix: is_fully_pinned must return False when allocations is empty."""
+        status = PinStatus(
+            cid="Qm",
+            name=None,
+            allocations=[],  # Empty allocations
+            peer_map={
+                "A": PeerPinStatus(peername="nas", status="unpinned", error=None),
+                "B": PeerPinStatus(peername="chll", status="unpinned", error=None),
+            },
+            replication_factor_min=2,
+            replication_factor_max=3,
+        )
+        assert status.is_fully_pinned() is False
+
     def test_pinned_count(self, sample_status):
         assert sample_status.pinned_count() == 1
 

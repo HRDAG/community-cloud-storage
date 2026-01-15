@@ -5,14 +5,30 @@ This module provides direct HTTP access to the IPFS Cluster API,
 eliminating the need for ipfs-cluster-ctl binary.
 
 API Reference: https://ipfscluster.io/documentation/reference/api/
+
+Debug logging:
+    Enable with: CCS_DEBUG=1 or by setting log level to DEBUG
+    Example: CCS_DEBUG=1 ccs add --profile hrdag /path/to/file
 """
 
 import json
+import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
+
+# Configure logger for this module
+logger = logging.getLogger(__name__)
+
+# Enable debug logging via environment variable
+if os.environ.get("CCS_DEBUG"):
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s %(name)s %(levelname)s: %(message)s",
+    )
+    logger.setLevel(logging.DEBUG)
 
 
 class ClusterAPIError(Exception):
@@ -45,7 +61,23 @@ class ClusterClient:
     def _request(self, method: str, endpoint: str, **kwargs) -> requests.Response:
         """Make HTTP request to cluster API."""
         url = f"{self.base_url}{endpoint}"
+
+        # Debug logging for request
+        logger.debug(f"Request: {method} {url}")
+        if "files" in kwargs:
+            file_info = [(name, getattr(f[1], 'name', str(f[1])[:50]))
+                         for name, f in (kwargs["files"] if isinstance(kwargs["files"], list)
+                                         else kwargs["files"].items())]
+            logger.debug(f"Request files: {file_info}")
+
         response = self.session.request(method, url, **kwargs)
+
+        # Debug logging for response
+        logger.debug(f"Response status: {response.status_code}")
+        logger.debug(f"Response headers: {dict(response.headers)}")
+        # Truncate body for logging (first 2000 chars)
+        body_preview = response.text[:2000] if response.text else "(empty)"
+        logger.debug(f"Response body: {body_preview}")
 
         if response.status_code == 401:
             raise ClusterAPIError("Unauthorized: check basic auth credentials", 401)
@@ -109,6 +141,7 @@ class ClusterClient:
         recursive: bool = True,
         name: str = None,
         allocations: list[str] = None,
+        local: bool = True,
     ) -> list:
         """
         Add a file or directory to the cluster.
@@ -118,31 +151,44 @@ class ClusterClient:
             recursive: If True and path is directory, add recursively
             name: Pin name for cluster metadata (defaults to filename/dirname)
             allocations: List of peer IDs for explicit allocation (optional)
+            local: If True, always include the connected node in allocations
+                   (default True - ensures primary node is allocated)
 
         Returns:
-            List of dicts with 'name' and 'cid' for each added item.
-            Last item is the root CID.
+            List of dicts with 'name', 'cid', and 'allocations' for each added item.
+            Last item is the root CID. The 'allocations' field contains the actual
+            peer IDs assigned by the cluster (may differ from requested allocations).
         """
         if name is None:
             name = path.name
 
+        logger.debug(f"add() called: path={path}, name={name}, allocations={allocations}, local={local}")
+
         if path.is_file():
-            return self._add_file(path, name, allocations)
+            return self._add_file(path, name, allocations, local)
         elif path.is_dir() and recursive:
-            return self._add_directory(path, name, allocations)
+            return self._add_directory(path, name, allocations, local)
         else:
             raise ValueError(f"Path {path} is not a file or directory")
 
-    def _build_add_params(self, name: str, allocations: list[str] = None) -> str:
+    def _build_add_params(
+        self, name: str, allocations: list[str] = None, local: bool = True
+    ) -> str:
         """Build query string for /add endpoint."""
         params = [f"name={name}"]
         if allocations:
             params.append(f"allocations={','.join(allocations)}")
+        if local:
+            params.append("local=true")
         return "&".join(params)
 
-    def _add_file(self, path: Path, name: str, allocations: list[str] = None) -> list:
+    def _add_file(
+        self, path: Path, name: str, allocations: list[str] = None, local: bool = True
+    ) -> list:
         """Add a single file."""
-        query = self._build_add_params(name, allocations)
+        query = self._build_add_params(name, allocations, local)
+        logger.debug(f"_add_file: query string = {query}")
+
         with open(path, "rb") as f:
             files = {"file": (path.name, f)}
             response = self._request("POST", f"/add?{query}", files=files)
@@ -151,11 +197,16 @@ class ClusterClient:
         results = []
         for line in response.text.strip().split("\n"):
             if line:
-                import json
-                results.append(json.loads(line))
+                entry = json.loads(line)
+                results.append(entry)
+                logger.debug(f"_add_file: parsed entry = {entry}")
+
+        logger.debug(f"_add_file: total entries = {len(results)}")
         return results
 
-    def _add_directory(self, path: Path, name: str, allocations: list[str] = None) -> list:
+    def _add_directory(
+        self, path: Path, name: str, allocations: list[str] = None, local: bool = True
+    ) -> list:
         """Add a directory recursively using multipart form."""
         # Collect all files with their relative paths
         files_to_add = []
@@ -166,12 +217,15 @@ class ClusterClient:
                 rel_path = file_path.relative_to(base_path)
                 files_to_add.append((file_path, str(rel_path)))
 
+        logger.debug(f"_add_directory: found {len(files_to_add)} files")
+
         # Build multipart form with all files
         # IPFS Cluster expects files with path info in the filename
         files = []
         file_handles = []
 
-        query = self._build_add_params(name, allocations)
+        query = self._build_add_params(name, allocations, local)
+        logger.debug(f"_add_directory: query string = {query}")
 
         try:
             for file_path, rel_path in files_to_add:
@@ -188,9 +242,11 @@ class ClusterClient:
         results = []
         for line in response.text.strip().split("\n"):
             if line:
-                import json
-                results.append(json.loads(line))
+                entry = json.loads(line)
+                results.append(entry)
+                logger.debug(f"_add_directory: parsed entry = {entry}")
 
+        logger.debug(f"_add_directory: total entries = {len(results)}")
         return results
 
 
