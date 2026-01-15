@@ -20,10 +20,16 @@ import json
 @dataclass
 class CIDEntry:
     """A single file or directory entry with its CID."""
-    path: str           # Relative path within the add
-    cid: str            # The IPFS CID
-    size: int           # Size in bytes
-    is_root: bool = False  # True if this is the root entry (cid == root_cid)
+    path: str                       # Relative path within the add
+    cid: str                        # The IPFS CID (empty string if failed)
+    size: int                       # Size in bytes
+    is_root: bool = False           # True if this is the root entry (cid == root_cid)
+    error: Optional[str] = None     # Error message if this entry failed
+
+    @property
+    def ok(self) -> bool:
+        """True if this entry was added successfully."""
+        return self.error is None and self.cid != ""
 
     def to_dict(self) -> dict:
         return {
@@ -31,6 +37,7 @@ class CIDEntry:
             "cid": self.cid,
             "size": self.size,
             "is_root": self.is_root,
+            "error": self.error,
         }
 
     @classmethod
@@ -40,6 +47,7 @@ class CIDEntry:
             cid=data["cid"],
             size=data["size"],
             is_root=data.get("is_root", False),
+            error=data.get("error"),
         )
 
     @classmethod
@@ -51,21 +59,39 @@ class CIDEntry:
             cid=entry["cid"],
             size=entry.get("size", 0),
             is_root=is_root,
+            error=None,
         )
+
+
+# Return codes for AddResult
+RC_SUCCESS = 0          # All entries added successfully
+RC_PARTIAL = 1          # Some entries added, some failed
+RC_FAILED = 2           # No entries added (API/network error)
+RC_CONFIG_ERROR = 3     # Configuration error (missing profile, peer_id, etc.)
 
 
 @dataclass
 class AddResult:
     """Result of adding file(s) to the cluster."""
-    root_cid: str                           # CID of the root (top-level item)
+    root_cid: str                           # CID of the root (top-level item, empty if failed)
     root_path: str                          # Original filesystem path
     entries: list[CIDEntry]                 # All files/dirs with their CIDs
     allocations: list[str]                  # Peer IDs for explicit allocation
     profile: Optional[str]                  # Profile used (e.g., "hrdag")
     added_at: datetime                      # When the add completed
     cluster_host: str                       # Node we talked to
-    complete: bool                          # True if add fully succeeded
-    error: Optional[str] = None             # Error message if incomplete
+    returncode: int                         # 0=success, 1=partial, 2=failed, 3=config error
+    error: Optional[str] = None             # Error message if returncode != 0
+
+    @property
+    def ok(self) -> bool:
+        """True if add fully succeeded (returncode == 0)."""
+        return self.returncode == RC_SUCCESS
+
+    @property
+    def complete(self) -> bool:
+        """Alias for ok, for backward compatibility."""
+        return self.ok
 
     def to_dict(self) -> dict:
         return {
@@ -76,7 +102,7 @@ class AddResult:
             "profile": self.profile,
             "added_at": self.added_at.isoformat(),
             "cluster_host": self.cluster_host,
-            "complete": self.complete,
+            "returncode": self.returncode,
             "error": self.error,
         }
 
@@ -100,7 +126,7 @@ class AddResult:
             profile=data.get("profile"),
             added_at=added_at,
             cluster_host=data["cluster_host"],
-            complete=data["complete"],
+            returncode=data.get("returncode", RC_SUCCESS if data.get("complete", True) else RC_FAILED),
             error=data.get("error"),
         )
 

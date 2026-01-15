@@ -23,6 +23,9 @@ from community_cloud_storage.types import (
     CIDEntry,
     PeerInfo,
     PinStatus,
+    RC_SUCCESS,
+    RC_FAILED,
+    RC_CONFIG_ERROR,
 )
 
 
@@ -103,23 +106,59 @@ def add(
         host: Override which cluster node to talk to (default: config.default_node)
 
     Returns:
-        AddResult with root CID, all entries, and allocation info
-
-    Raises:
-        ConfigError: If config is missing required fields
-        AllocationError: If allocations cannot be determined
-        ClusterAPIError: If cluster API returns an error
-        FileNotFoundError: If path doesn't exist
+        AddResult with root CID, all entries, and allocation info.
+        Never raises exceptions - check returncode for success:
+        - 0 (RC_SUCCESS): All entries added successfully
+        - 2 (RC_FAILED): No entries added (API/network error)
+        - 3 (RC_CONFIG_ERROR): Configuration error (missing profile, peer_id, etc.)
     """
-    if not path.exists():
-        raise FileNotFoundError(f"Path not found: {path}")
-
-    # Determine allocations
-    allocations = _get_allocations(profile, config)
-
-    # Get client
     target_host = host or config.default_node
-    client = _get_client(config, target_host)
+
+    # Check path exists
+    if not path.exists():
+        return AddResult(
+            root_cid="",
+            root_path=str(path),
+            entries=[],
+            allocations=[],
+            profile=profile,
+            added_at=datetime.now(timezone.utc),
+            cluster_host=target_host or "",
+            returncode=RC_FAILED,
+            error=f"Path not found: {path}",
+        )
+
+    # Determine allocations - config errors
+    try:
+        allocations = _get_allocations(profile, config)
+    except (ConfigError, AllocationError) as e:
+        return AddResult(
+            root_cid="",
+            root_path=str(path),
+            entries=[],
+            allocations=[],
+            profile=profile,
+            added_at=datetime.now(timezone.utc),
+            cluster_host=target_host or "",
+            returncode=RC_CONFIG_ERROR,
+            error=str(e),
+        )
+
+    # Get client - config errors
+    try:
+        client = _get_client(config, target_host)
+    except ConfigError as e:
+        return AddResult(
+            root_cid="",
+            root_path=str(path),
+            entries=[],
+            allocations=allocations,
+            profile=profile,
+            added_at=datetime.now(timezone.utc),
+            cluster_host=target_host or "",
+            returncode=RC_CONFIG_ERROR,
+            error=str(e),
+        )
 
     # Add to cluster with allocations
     try:
@@ -138,8 +177,21 @@ def add(
             profile=profile,
             added_at=datetime.now(timezone.utc),
             cluster_host=target_host,
-            complete=False,
+            returncode=RC_FAILED,
             error=str(e),
+        )
+    except Exception as e:
+        # Catch any unexpected errors
+        return AddResult(
+            root_cid="",
+            root_path=str(path),
+            entries=[],
+            allocations=allocations,
+            profile=profile,
+            added_at=datetime.now(timezone.utc),
+            cluster_host=target_host,
+            returncode=RC_FAILED,
+            error=f"Unexpected error: {e}",
         )
 
     # Root is the last entry from IPFS
@@ -164,7 +216,7 @@ def add(
         profile=profile,
         added_at=datetime.now(timezone.utc),
         cluster_host=target_host,
-        complete=True,
+        returncode=RC_SUCCESS,
         error=None,
     )
 

@@ -27,6 +27,7 @@ from community_cloud_storage.operations import (
     AllocationError,
     ConfigError,
 )
+from community_cloud_storage.types import RC_FAILED, RC_CONFIG_ERROR
 
 
 @pytest.fixture
@@ -125,9 +126,11 @@ class TestAdd:
             assert len(result.entries) == 3
             assert result.total_size() == 30
 
-    def test_add_nonexistent_path_raises(self, sample_config):
-        with pytest.raises(FileNotFoundError):
-            add(Path("/nonexistent/path"), profile="hrdag", config=sample_config)
+    def test_add_nonexistent_path_returns_error(self, sample_config):
+        result = add(Path("/nonexistent/path"), profile="hrdag", config=sample_config)
+        assert result.ok is False
+        assert result.returncode == RC_FAILED
+        assert "not found" in result.error.lower()
 
     @patch("community_cloud_storage.operations.ClusterClient")
     def test_add_api_error_returns_incomplete(self, mock_client_class, sample_config):
@@ -144,9 +147,24 @@ class TestAdd:
         try:
             result = add(path, profile="hrdag", config=sample_config)
 
-            assert result.complete is False
+            assert result.ok is False
+            assert result.returncode == RC_FAILED
             assert "Connection failed" in result.error
             assert result.entries == []
+        finally:
+            path.unlink()
+
+    def test_add_unknown_profile_returns_config_error(self, sample_config):
+        with tempfile.NamedTemporaryFile(mode="w", delete=False) as f:
+            f.write("test")
+            path = Path(f.name)
+
+        try:
+            result = add(path, profile="nonexistent", config=sample_config)
+
+            assert result.ok is False
+            assert result.returncode == RC_CONFIG_ERROR
+            assert "nonexistent" in result.error.lower()
         finally:
             path.unlink()
 

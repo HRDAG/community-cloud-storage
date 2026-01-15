@@ -17,6 +17,8 @@ from community_cloud_storage.types import (
     PeerInfo,
     PeerPinStatus,
     PinStatus,
+    RC_SUCCESS,
+    RC_FAILED,
 )
 
 
@@ -24,7 +26,7 @@ class TestCIDEntry:
     def test_to_dict(self):
         entry = CIDEntry(path="file.txt", cid="Qm123", size=100, is_root=False)
         d = entry.to_dict()
-        assert d == {"path": "file.txt", "cid": "Qm123", "size": 100, "is_root": False}
+        assert d == {"path": "file.txt", "cid": "Qm123", "size": 100, "is_root": False, "error": None}
 
     def test_from_dict(self):
         d = {"path": "dir/", "cid": "Qm456", "size": 0, "is_root": True}
@@ -54,6 +56,18 @@ class TestCIDEntry:
         assert original.size == restored.size
         assert original.is_root == restored.is_root
 
+    def test_ok_success(self):
+        entry = CIDEntry(path="file.txt", cid="Qm123", size=100)
+        assert entry.ok is True
+
+    def test_ok_with_error(self):
+        entry = CIDEntry(path="file.txt", cid="", size=0, error="Failed to add")
+        assert entry.ok is False
+
+    def test_ok_empty_cid(self):
+        entry = CIDEntry(path="file.txt", cid="", size=0)
+        assert entry.ok is False
+
 
 class TestAddResult:
     @pytest.fixture
@@ -70,7 +84,7 @@ class TestAddResult:
             profile="hrdag",
             added_at=datetime(2026, 1, 14, 12, 0, 0, tzinfo=timezone.utc),
             cluster_host="nas",
-            complete=True,
+            returncode=RC_SUCCESS,
             error=None,
         )
 
@@ -79,7 +93,7 @@ class TestAddResult:
         assert d["root_cid"] == "QmRoot"
         assert d["profile"] == "hrdag"
         assert len(d["entries"]) == 3
-        assert d["complete"] is True
+        assert d["returncode"] == RC_SUCCESS
         assert d["allocations"] == ["12D3KooW1", "12D3KooW2"]
 
     def test_to_json(self, sample_result):
@@ -119,8 +133,28 @@ class TestAddResult:
         assert restored.root_cid == sample_result.root_cid
         assert restored.root_path == sample_result.root_path
         assert restored.profile == sample_result.profile
-        assert restored.complete == sample_result.complete
+        assert restored.returncode == sample_result.returncode
+        assert restored.ok == sample_result.ok
         assert len(restored.entries) == len(sample_result.entries)
+
+    def test_ok_success(self, sample_result):
+        assert sample_result.ok is True
+        assert sample_result.complete is True  # backward compat alias
+
+    def test_ok_failed(self):
+        result = AddResult(
+            root_cid="",
+            root_path="/path/to/file",
+            entries=[],
+            allocations=[],
+            profile="hrdag",
+            added_at=datetime(2026, 1, 14, tzinfo=timezone.utc),
+            cluster_host="nas",
+            returncode=RC_FAILED,
+            error="Connection refused",
+        )
+        assert result.ok is False
+        assert result.complete is False
 
 
 class TestPeerInfo:

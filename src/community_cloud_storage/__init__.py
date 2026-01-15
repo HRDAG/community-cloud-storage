@@ -41,6 +41,10 @@ from community_cloud_storage.types import (
     PeerInfo,
     PeerPinStatus,
     PinStatus,
+    RC_SUCCESS,
+    RC_PARTIAL,
+    RC_FAILED,
+    RC_CONFIG_ERROR,
 )
 
 # Operations
@@ -71,6 +75,11 @@ __all__ = [
     "PeerInfo",
     "PeerPinStatus",
     "PinStatus",
+    # Return codes
+    "RC_SUCCESS",
+    "RC_PARTIAL",
+    "RC_FAILED",
+    "RC_CONFIG_ERROR",
     # Operations
     "add",
     "ls",
