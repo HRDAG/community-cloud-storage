@@ -9,35 +9,45 @@ from pathlib import Path
 
 import yaml
 
-DEFAULT_CONFIG_PATH = Path.home() / ".ccs" / "config.yml"
+from community_cloud_storage import config as config_module
+
+
+DEFAULT_CONFIG_PATH = config_module.DEFAULT_CONFIG_PATH
 
 
 def load_config(config_path: Path = None) -> dict:
     """
     Load cluster config from YAML file.
     Default: ~/.ccs/config.yml
+
     Returns dict with basic_auth_user, basic_auth_password, etc.
+    This is a backward-compatible wrapper around config_module.load_config().
+
+    For new code, use config_module.load_config() directly to get a CCSConfig object.
     """
-    path = config_path or DEFAULT_CONFIG_PATH
-    if not path.exists():
-        raise FileNotFoundError(f"Config file not found: {path}")
+    ccs_config = config_module.load_config(config_path)
 
-    with open(path) as f:
-        config = yaml.safe_load(f)
-
-    # Flatten cluster config for convenience
+    # Flatten for backward compatibility
     result = {}
-    if "cluster" in config:
-        result["basic_auth_user"] = config["cluster"].get("basic_auth_user")
-        result["basic_auth_password"] = config["cluster"].get("basic_auth_password")
-    if "default_node" in config:
-        result["default_node"] = config["default_node"]
+    if ccs_config.auth:
+        result["basic_auth_user"] = ccs_config.auth.user
+        result["basic_auth_password"] = ccs_config.auth.password
+    if ccs_config.default_node:
+        result["default_node"] = ccs_config.default_node
+
+    # Also include new fields for code that wants them
+    result["_ccs_config"] = ccs_config
 
     return result
 
 
 def get_basic_auth_string(config: dict) -> str:
     """Build basic auth string from config dict."""
+    # Check for new-style config object first
+    if "_ccs_config" in config:
+        return config["_ccs_config"].get_basic_auth_string()
+
+    # Fall back to old-style dict
     user = config.get("basic_auth_user")
     password = config.get("basic_auth_password")
     if user and password:

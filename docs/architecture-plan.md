@@ -19,29 +19,32 @@ This document describes the target architecture for Community Cloud Storage (CCS
 
 **Last updated:** 2026-01-13
 
-### Completed
-- [x] Architecture plan written and approved
-- [x] Host networking refactor (removed tailscale container)
-- [x] NDJSON parsing fix in cluster_api.py
-- [x] CCS code updated: replication settings in compose template
-- [x] CCS code updated: `--node-role` and `--node-org` CLI options
-- [x] Cluster state documented (peer IDs captured)
+### Phase 1: COMPLETE ✅
 
-### Current Cluster State
-| Node | Cluster Peer ID | Tailnet IP | Status |
-|------|-----------------|------------|--------|
-| nas | `12D3KooWRwzo72ZsiP5Hnfn2kGoi9f2u8AcQBozEP8MPVhpSqeLQ` | 100.64.0.31 | Running, needs config update |
-| meerkat | `12D3KooWFCXpnVGGTk3ykyMTnkSpoesCS5KFeJEQ37Nw1xFuRzGn` | 100.64.0.4 | Running, needs config update |
-| chll | — | — | Not yet deployed |
-| pihost | — | — | Not yet deployed |
-| ipfs1 | — | — | Not yet deployed |
+All 5 test nodes deployed and configured via ansible.
 
-### In Progress
-- [ ] Ansible role creation (pulled forward from Phase 3)
-- [ ] Deploy updated config to nas and meerkat via ansible
+| Node | Cluster Peer ID | Tailnet IP | Role | Org |
+|------|-----------------|------------|------|-----|
+| nas | `12D3KooWRwzo72ZsiP5Hnfn2kGoi9f2u8AcQBozEP8MPVhpSqeLQ` | 100.64.0.31 | primary | hrdag |
+| meerkat | `12D3KooWFCXpnVGGTk3ykyMTnkSpoesCS5KFeJEQ37Nw1xFuRzGn` | 100.64.0.4 | primary | test-orgB |
+| chll | (in ansible inventory) | 100.64.0.32 | backup | shared |
+| pihost | (in ansible inventory) | 100.64.0.2 | primary | test-orgC |
+| ipfs1 | (in ansible inventory) | 100.64.0.51 | primary | test-orgD |
+
+### Verified Configuration
+- [x] All 5 nodes in cluster, healthy, no errors
+- [x] Replication: min=2, max=3 (new pins get 3 allocations)
+- [x] disable_repinning: false (automatic rebalancing enabled)
+- [x] Port 5001: bound to 127.0.0.1 on all nodes (security)
+- [x] Ports 8080/9094: bound to tailnet IPs only
+- [x] Peernames: clean (no -ccs suffix)
+- [x] Tags configured via CLUSTER_INFORMER_TAGS_TAGS
 
 ### Key Decision: Ansible-Driven Deployment
 During Phase 1 implementation, we decided to pull ansible integration forward. Instead of CCS generating compose files and manually deploying, **ansible is now the single source of truth** for all node configuration. See Section 4.1 for details.
+
+### Next: Phase 2 — CCS CLI Updates
+Refactor CCS as library-first architecture with profile support and explicit allocations.
 
 ---
 
@@ -647,11 +650,11 @@ Periodic job to verify:
 ## 8. Success Criteria
 
 ### Phase 1 Complete When:
-- [ ] 5 test nodes in cluster (nas, chll, meerkat, pihost, ipfs1)
-- [ ] All nodes tagged correctly
-- [ ] `disable_repinning: false` on all nodes
-- [ ] Replication factors set correctly
-- [ ] Peer IDs captured and documented
+- [x] 5 test nodes in cluster (nas, chll, meerkat, pihost, ipfs1)
+- [x] All nodes tagged correctly
+- [x] `disable_repinning: false` on all nodes
+- [x] Replication factors set correctly
+- [x] Peer IDs captured and documented
 
 ### Phase 2 Complete When:
 - [ ] `ccs add --profile hrdag /test` creates pin on nas + chll + one test node

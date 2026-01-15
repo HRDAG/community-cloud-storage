@@ -1,0 +1,35 @@
+# CCS Client Configuration Example
+# Author: PB and Claude
+# Date: 2026-01-14
+#
+# Copy to ~/.ccs/config.yml and fill in values
+# Set permissions: chmod 600 ~/.ccs/config.yml
+
+# Cluster authentication (required)
+cluster:
+  basic_auth_user: admin
+  basic_auth_password: YOUR_PASSWORD_HERE
+
+# Default node for CLI commands (can override with --cluster-peername)
+default_node: nas
+
+# Shared backup node - all orgs replicate here
+backup_node: chll
+
+# Organization profiles: map org name to primary node
+profiles:
+  hrdag:
+    primary: nas
+  # Add more orgs as needed:
+  # orgB:
+  #   primary: orgB-node
+
+# Cluster nodes with peer IDs (populated by ansible after deploy)
+nodes:
+  nas:
+    host: nas                    # Hostname for API calls
+    peer_id: 12D3KooW...         # Cluster peer ID for allocations
+  chll:
+    host: chll
+    peer_id: 12D3KooW...
+  # Add more nodes as they join the cluster

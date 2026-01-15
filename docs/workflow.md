@@ -1,7 +1,7 @@
 <!--
 Author: PB and Claude
-Date: 2025-01-09
-License: (c) HRDAG, 2025, GPL-2 or newer
+Date: 2026-01-14
+License: (c) HRDAG, 2026, GPL-2 or newer
 
 ---
 docs/workflow.md
@@ -18,12 +18,42 @@ docs/workflow.md
 
 2. Create config file `~/.ccs/config.yml`:
    ```yaml
+   # Authentication (required)
    cluster:
      basic_auth_user: admin
      basic_auth_password: <your-password>
+
+   # Default node for CLI commands
+   default_node: nas
+
+   # Shared backup node (all orgs replicate here)
+   backup_node: chll
+
+   # Organization profiles
+   profiles:
+     hrdag:
+       primary: nas
+     test-orgB:
+       primary: meerkat
+
+   # Cluster nodes with peer IDs (populated by ansible)
+   nodes:
+     nas:
+       host: nas
+       peer_id: 12D3KooW...
+     meerkat:
+       host: meerkat
+       peer_id: 12D3KooW...
+     chll:
+       host: chll
+       peer_id: 12D3KooW...
    ```
 
-3. Be on the Tailnet (Tailscale connected)
+   See `config.yml.example` in repo root for full template.
+
+3. Set permissions: `chmod 600 ~/.ccs/config.yml`
+
+4. Be on the Tailnet (Tailscale connected)
 
 ## Adding Files
 
@@ -90,7 +120,7 @@ ccs add --cluster-peername nas --basic-auth-file ~/.ccs/config.yml /tmp/test.txt
 
 # Check replication
 ccs status QmXYZ... --cluster-peername nas --basic-auth-file ~/.ccs/config.yml
-# → pinned on nas-ccs AND meerkat
+# → pinned on nas AND meerkat
 
 # Retrieve from cluster
 ccs get QmXYZ... --cluster-peername nas --output /tmp/retrieved.txt
@@ -105,9 +135,11 @@ ccs rm QmXYZ... --cluster-peername nas --basic-auth-file ~/.ccs/config.yml
 
 | Node | Tailnet Hostname | Role | Org |
 |------|------------------|------|-----|
-| nas | nas | Primary | hrdag |
-| meerkat | meerkat | Primary | test-orgB |
-| chll | chll | Backup | shared |
+| nas | nas | primary | hrdag |
+| meerkat | meerkat | primary | test-orgB |
+| chll | chll | backup | shared |
+| pihost | pihost | primary | test-orgC |
+| ipfs1 | ipfs1 | primary | test-orgD |
 
 See `docs/architecture-plan.md` for full cluster topology.
 
