@@ -206,6 +206,120 @@ def ls(config_file: Path, host: str) -> None:
     click.echo(json.dumps(output, indent=2))
 
 
+@cli.command()
+@click.option(
+    "--config-file",
+    type=click.Path(exists=True, path_type=Path),
+    help="Config file path (default: ~/.ccs/config.yml)",
+)
+@click.option(
+    "--validate-only",
+    is_flag=True,
+    help="Only validate config, don't display it",
+)
+@click.option(
+    "--output-json",
+    type=click.Path(path_type=Path),
+    help="Write config as JSON to this file",
+)
+def config(config_file: Path, validate_only: bool, output_json: Path) -> None:
+    """
+    Display and validate CCS configuration.
+
+    Shows current config settings and checks for errors/warnings.
+
+    Examples:
+
+        ccs config                    # Display config with validation
+
+        ccs config --validate-only    # Just check for errors
+
+        ccs config --output-json config.json   # Export as JSON
+    """
+    import json
+
+    config_path = config_file or config_module.DEFAULT_CONFIG_PATH
+
+    try:
+        cfg = config_module.load_config(config_file)
+    except FileNotFoundError:
+        click.echo(f"Error: Config file not found: {config_path}", err=True)
+        click.echo(f"Create config at {config_path} or use --config-file", err=True)
+        sys.exit(1)
+
+    errors, warnings = cfg.validate()
+
+    if validate_only:
+        # Just show validation results
+        if errors:
+            click.echo("Errors:", err=True)
+            for e in errors:
+                click.echo(f"  ✗ {e}", err=True)
+        if warnings:
+            click.echo("Warnings:")
+            for w in warnings:
+                click.echo(f"  ⚠ {w}")
+        if not errors and not warnings:
+            click.echo("✓ Config is valid")
+        sys.exit(1 if errors else 0)
+
+    # Display config
+    click.echo(f"Config file: {config_path}")
+    click.echo()
+
+    click.echo("Settings:")
+    click.echo(f"  default_node: {cfg.default_node or '(not set)'}")
+    click.echo(f"  backup_node: {cfg.backup_node or '(not set)'}")
+    click.echo(f"  auth: {'configured' if cfg.auth else '(not set)'}")
+    click.echo()
+
+    if cfg.profiles:
+        click.echo("Profiles:")
+        for name, profile in cfg.profiles.items():
+            click.echo(f"  {name}: primary={profile.primary}")
+        click.echo()
+
+    if cfg.nodes:
+        click.echo("Nodes:")
+        for name, node in cfg.nodes.items():
+            peer_id = node.peer_id[:16] + "..." if node.peer_id else "(no peer_id)"
+            click.echo(f"  {name}: host={node.host}, peer_id={peer_id}")
+        click.echo()
+
+    # Validation results
+    if errors:
+        click.echo("Errors:", err=True)
+        for e in errors:
+            click.echo(f"  ✗ {e}", err=True)
+    if warnings:
+        click.echo("Warnings:")
+        for w in warnings:
+            click.echo(f"  ⚠ {w}")
+    if not errors and not warnings:
+        click.echo("✓ Config is valid")
+
+    # Write JSON if requested
+    if output_json:
+        # Don't include secrets in JSON output
+        output_data = {
+            "config_path": str(config_path),
+            "default_node": cfg.default_node,
+            "backup_node": cfg.backup_node,
+            "has_auth": cfg.auth is not None,
+            "profiles": {name: p.to_dict() for name, p in cfg.profiles.items()},
+            "nodes": {name: {"host": n.host, "has_peer_id": n.peer_id is not None}
+                      for name, n in cfg.nodes.items()},
+            "errors": errors,
+            "warnings": warnings,
+            "valid": len(errors) == 0,
+        }
+        with open(output_json, "w") as f:
+            json.dump(output_data, f, indent=2)
+        click.echo(f"Config written to: {output_json}")
+
+    sys.exit(1 if errors else 0)
+
+
 # =============================================================================
 # Legacy commands (for backward compatibility)
 # =============================================================================

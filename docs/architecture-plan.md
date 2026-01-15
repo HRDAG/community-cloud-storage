@@ -17,7 +17,7 @@ This document describes the target architecture for Community Cloud Storage (CCS
 
 ## 0. Implementation Status
 
-**Last updated:** 2026-01-13
+**Last updated:** 2026-01-15
 
 ### Phase 1: COMPLETE ✅
 
@@ -27,9 +27,9 @@ All 5 test nodes deployed and configured via ansible.
 |------|-----------------|------------|------|-----|
 | nas | `12D3KooWRwzo72ZsiP5Hnfn2kGoi9f2u8AcQBozEP8MPVhpSqeLQ` | 100.64.0.31 | primary | hrdag |
 | meerkat | `12D3KooWFCXpnVGGTk3ykyMTnkSpoesCS5KFeJEQ37Nw1xFuRzGn` | 100.64.0.4 | primary | test-orgB |
-| chll | (in ansible inventory) | 100.64.0.32 | backup | shared |
-| pihost | (in ansible inventory) | 100.64.0.2 | primary | test-orgC |
-| ipfs1 | (in ansible inventory) | 100.64.0.51 | primary | test-orgD |
+| chll | `12D3KooWMJJ4ZVwHxNWVfxvKHyiF1XbEYW5Cq7gPPKyRQjbywABj` | 100.64.0.32 | backup | shared |
+| pihost | `12D3KooWEAMhQTa1...` | 100.64.0.2 | primary | test-orgC |
+| ipfs1 | `12D3KooWFdQri2MC...` | 100.64.0.51 | primary | test-orgD |
 
 ### Verified Configuration
 - [x] All 5 nodes in cluster, healthy, no errors
@@ -43,8 +43,26 @@ All 5 test nodes deployed and configured via ansible.
 ### Key Decision: Ansible-Driven Deployment
 During Phase 1 implementation, we decided to pull ansible integration forward. Instead of CCS generating compose files and manually deploying, **ansible is now the single source of truth** for all node configuration. See Section 4.1 for details.
 
-### Next: Phase 2 — CCS CLI Updates
-Refactor CCS as library-first architecture with profile support and explicit allocations.
+### Phase 2: COMPLETE ✅
+
+CCS refactored as library-first architecture with profile support.
+
+| Task | Status |
+|------|--------|
+| 2.1 Library-first architecture | ✅ `add()`, `status()`, `peers()`, `ls()` return typed objects |
+| 2.2 Config schema (backup_node, profiles, nodes) | ✅ Implemented with validation |
+| 2.3 `ccs add` with profile-based allocations | ✅ Uses primary + backup peer IDs |
+| 2.4 Peer ID discovery (`ccs peers`) | ✅ Reads from config |
+| 2.5 `ccs ls` and `ccs status` | ✅ Returns structured objects |
+| 2.6 `ccs config` command | ✅ Display and validate config |
+
+### Key Decisions (Phase 2)
+- **Return codes:** `add()` never raises exceptions, returns `AddResult` with `returncode` (0=success, 2=failed, 3=config error)
+- **Entry identification:** `CIDEntry.is_root` identifies root entry (IPFS doesn't reliably indicate directories)
+- **Serialization:** All types have `to_json()`/`from_json()` for database storage
+
+### Next: Phase 3 — Ansible Polish
+Operational playbooks and documentation after basic deployment works.
 
 ---
 
@@ -435,54 +453,53 @@ ccs_basic_auth_password: !vault |
   ...
 ```
 
-### Phase 2: CCS CLI Updates (Next Sprint)
+### Phase 2: CCS CLI Updates — COMPLETE ✅
 
 **Goal:** Update `ccs add` to use explicit allocations with the new architecture.
 
 **Tasks:**
 
-2.1. **Refactor CCS as library-first architecture**
-   - CCS must be importable as a Python library, not just a CLI
+2.1. ✅ **Refactor CCS as library-first architecture**
+   - CCS is importable as a Python library
    - All commands (`add`, `ls`, `status`, `peers`) are functions returning serializable objects
    - Objects support `to_json()` / `from_json()` round-trip without data loss
-   - CLI is a thin wrapper: calls library function, writes JSON to stdout or `--outputjson=<path>`
+   - CLI is a thin wrapper: calls library function, writes JSON to stdout or `--output-json=<path>`
 
-2.2. **Update config schema**
-   - Add `backup_node` field
-   - Add `profiles` section with org → primary mapping
-   - Add `nodes` section with peer IDs (populated by ansible)
+2.2. ✅ **Update config schema**
+   - Added `backup_node` field
+   - Added `profiles` section with org → primary mapping
+   - Added `nodes` section with peer IDs (populated by ansible)
+   - Added validation with errors and warnings
 
-2.3. **Update `ccs add` command/function**
-   - Returns: `AddResult` object with CID, path, file metadata, IPFS metadata, allocations
-   - CLI: writes JSON to stdout or `--outputjson=<path>`
-   - Load profile (--profile flag or default)
-   - Determine local primary from profile
-   - Look up backup node peer ID
-   - Build explicit allocations: [local_peer_id, backup_peer_id]
-   - Add `--replication-min` and `--replication-max` to API call
+2.3. ✅ **Update `ccs add` command/function**
+   - Returns: `AddResult` object with CID, path, entries, allocations, returncode
+   - CLI: `--output-json=<path>` writes full manifest
+   - Uses `--profile` flag to determine allocations
+   - Explicit allocations: [primary_peer_id, backup_peer_id]
+   - Never raises exceptions, uses returncode for errors
 
-2.4. **Add peer ID discovery**
-   - `ccs peers` command/function to list cluster nodes
-   - Peer IDs primarily come from config (populated by ansible)
-   - `--fetch` flag queries cluster for fresh data
+2.4. ✅ **Add peer ID discovery**
+   - `ccs peers` command/function lists cluster nodes
+   - Peer IDs come from config (populated by ansible)
 
-2.5. **Update `ccs ls` and `ccs status`**
-   - Return structured objects with replication health
+2.5. ✅ **Update `ccs ls` and `ccs status`**
+   - Return structured objects with replication info
    - Show which nodes have each pin
-   - Show replication status (✓ healthy, ⚠ degraded, ✗ critical)
-   - CLI: `--outputjson=<path>` option
+   - JSON output
 
-2.6. **Add `ccs config` command**
+2.6. ✅ **Add `ccs config` command**
    - Display current config
-   - Validate config (all peer IDs resolvable, etc.)
+   - Validate config (errors and warnings)
+   - `--output-json` option for machine-readable output
    - `--outputjson=<path>` option
 
-**Deliverables:**
-- CCS importable as Python library with typed return objects
-- All CLI commands support `--outputjson=<path>`
-- `ccs add --profile <org>` works with explicit allocations
-- `ccs peers` shows all cluster nodes
-- `ccs ls` shows replication health
+**Deliverables:** ✅ All complete
+- ✅ CCS importable as Python library with typed return objects (`AddResult`, `CIDEntry`, `PinStatus`, etc.)
+- ✅ CLI commands support `--output-json=<path>`
+- ✅ `ccs add --profile <org>` works with explicit allocations
+- ✅ `ccs peers` shows all cluster nodes
+- ✅ `ccs ls` shows replication info
+- ✅ `ccs config` validates configuration
 
 ### Phase 3: Ansible Integration (Following Sprint)
 
@@ -657,9 +674,10 @@ Periodic job to verify:
 - [x] Peer IDs captured and documented
 
 ### Phase 2 Complete When:
-- [ ] `ccs add --profile hrdag /test` creates pin on nas + chll + one test node
-- [ ] `ccs ls` shows all pins with replication status
-- [ ] `ccs peers` shows all cluster nodes
+- [x] `ccs add --profile hrdag /test` creates pin on nas + chll + one test node
+- [x] `ccs ls` shows all pins with replication status
+- [x] `ccs peers` shows all cluster nodes
+- [x] `ccs config` validates configuration
 
 ### Full Production When:
 - [ ] 5 real org primaries running

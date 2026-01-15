@@ -55,80 +55,146 @@ docs/workflow.md
 
 4. Be on the Tailnet (Tailscale connected)
 
+5. Validate your config:
+   ```bash
+   ccs config
+   ```
+
 ## Adding Files
 
-Upload a file from your local machine to the cluster:
+Upload a file or directory to the cluster using a profile:
 
 ```bash
-ccs add --cluster-peername nas --basic-auth-file ~/.ccs/config.yml /path/to/file
+ccs add /path/to/file --profile hrdag
 ```
 
 Output:
 ```
-adding /path/to/file to nas-ccs
+added /path/to/file with profile hrdag
 root CID: QmVqTRe9i8eydScA3ZYmTJ8SYNT4CRDBfBWqen63VuyKBP
 entries: 1
+allocations: 12D3KooWRwzo..., 12D3KooWMJJ4...
 ```
 
-The file is uploaded via HTTP to the cluster API and automatically replicated to all nodes.
+The file is pinned to:
+1. Your profile's primary node (nas for hrdag)
+2. The backup node (chll)
+3. One additional node chosen by the cluster allocator
+
+### Saving the manifest
+
+To save the full result as JSON for database storage:
+
+```bash
+ccs add /path/to/directory --profile hrdag --output-json manifest.json
+```
+
+The manifest contains:
+- `root_cid`: The root CID
+- `entries`: All files/directories with their individual CIDs
+- `allocations`: Peer IDs where content is pinned
+- `returncode`: 0 for success, non-zero for errors
 
 ## Checking Status
 
-Verify a file is pinned and replicated:
+Verify a CID is pinned and replicated:
 
 ```bash
-ccs status <CID> --cluster-peername nas --basic-auth-file ~/.ccs/config.yml
+ccs status <CID>
 ```
 
-Look for `"status": "pinned"` on each node in `peer_map`.
+Returns JSON with pin status across all nodes. Look for `"status": "pinned"` in `peer_map`.
 
 ## Listing Pins
 
 List all CIDs pinned in the cluster:
 
 ```bash
-ccs ls --cluster-peername nas --basic-auth-file ~/.ccs/config.yml
+ccs ls
+```
+
+Returns JSON array of all pins with replication info.
+
+## Listing Peers
+
+List all nodes in the cluster:
+
+```bash
+ccs peers
+```
+
+Returns JSON array of peer info including names and addresses.
+
+## Validating Config
+
+Check your configuration for errors:
+
+```bash
+ccs config                    # Display config with validation
+ccs config --validate-only    # Just check for errors
+ccs config --output-json config-check.json   # Export validation results
 ```
 
 ## Retrieving Files
 
-Download a file by CID:
+Download a file by CID (uses IPFS gateway, no auth required):
 
 ```bash
 ccs get <CID> --cluster-peername nas --output /path/to/output
 ```
-
-Note: `get` uses the IPFS gateway (port 8080) and does not require authentication.
 
 ## Removing Files
 
 Unpin a CID from the cluster:
 
 ```bash
-ccs rm <CID> --cluster-peername nas --basic-auth-file ~/.ccs/config.yml
+ccs rm <CID> --cluster-peername nas
 ```
+
+**Warning:** This removes the pin from all nodes. Use with caution.
 
 ## Example Session
 
 ```bash
-# Create a test file
-echo "Hello from CCS" > /tmp/test.txt
+# Validate config first
+ccs config --validate-only
 
-# Add to cluster
-ccs add --cluster-peername nas --basic-auth-file ~/.ccs/config.yml /tmp/test.txt
-# → root CID: QmXYZ...
+# Create a test directory
+mkdir -p /tmp/test-archive
+echo "File 1" > /tmp/test-archive/file1.txt
+echo "File 2" > /tmp/test-archive/file2.txt
 
-# Check replication
-ccs status QmXYZ... --cluster-peername nas --basic-auth-file ~/.ccs/config.yml
-# → pinned on nas AND meerkat
+# Add to cluster with manifest
+ccs add /tmp/test-archive --profile hrdag --output-json /tmp/manifest.json
 
-# Retrieve from cluster
-ccs get QmXYZ... --cluster-peername nas --output /tmp/retrieved.txt
-cat /tmp/retrieved.txt
-# → Hello from CCS
+# Check the manifest
+cat /tmp/manifest.json | jq '.root_cid, .entries | length'
+# → "QmXYZ..."
+# → 3
 
-# Clean up
-ccs rm QmXYZ... --cluster-peername nas --basic-auth-file ~/.ccs/config.yml
+# Verify replication
+ccs status $(cat /tmp/manifest.json | jq -r '.root_cid')
+
+# List all pins
+ccs ls | jq 'length'
+```
+
+## Library Usage
+
+CCS can be imported as a Python library:
+
+```python
+from community_cloud_storage import add, load_config, RC_SUCCESS
+
+config = load_config()
+result = add("/path/to/file", profile="hrdag", config=config)
+
+if result.ok:  # or: result.returncode == RC_SUCCESS
+    print(f"Added: {result.root_cid}")
+    # Save to database
+    db.store(result.to_json())
+else:
+    print(f"Error: {result.error}")
 ```
 
 ## Cluster Nodes

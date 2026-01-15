@@ -130,16 +130,23 @@ class CCSConfig:
         """Get basic auth string for API calls."""
         return self.auth.to_auth_string() if self.auth else None
 
-    def validate(self) -> list[str]:
+    def validate(self) -> tuple[list[str], list[str]]:
         """
-        Validate configuration, return list of errors.
-        Empty list means config is valid.
+        Validate configuration, return (errors, warnings).
+        Empty errors list means config is valid for operations.
         """
         errors = []
+        warnings = []
 
-        # Check backup_node references a known node
-        if self.backup_node and self.backup_node not in self.nodes:
+        # Check backup_node is set
+        if not self.backup_node:
+            errors.append("backup_node is not set")
+        elif self.backup_node not in self.nodes:
             errors.append(f"backup_node '{self.backup_node}' not found in nodes")
+
+        # Check default_node
+        if self.default_node and self.default_node not in self.nodes:
+            errors.append(f"default_node '{self.default_node}' not found in nodes")
 
         # Check each profile's primary references a known node
         for name, profile in self.profiles.items():
@@ -148,10 +155,16 @@ class CCSConfig:
                     f"profile '{name}' references unknown node '{profile.primary}'"
                 )
 
-        # Check nodes have peer_ids (warning, not error)
-        # This is optional - peer_ids populated by ansible after deploy
+        # Check nodes have peer_ids (warning - needed for allocations)
+        for name, node in self.nodes.items():
+            if not node.peer_id:
+                warnings.append(f"node '{name}' has no peer_id (run ansible to populate)")
 
-        return errors
+        # Check auth is set (warning - needed for most operations)
+        if not self.auth:
+            warnings.append("no cluster auth configured")
+
+        return errors, warnings
 
     def to_dict(self) -> dict:
         """Serialize config to dict (for saving)."""

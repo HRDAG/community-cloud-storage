@@ -115,29 +115,45 @@ class TestCCSConfig:
             backup_node="chll",
             profiles={"hrdag": ProfileConfig(name="hrdag", primary="nas")},
             nodes={
-                "nas": NodeConfig(name="nas", host="nas"),
-                "chll": NodeConfig(name="chll", host="chll"),
+                "nas": NodeConfig(name="nas", host="nas", peer_id="12D3A"),
+                "chll": NodeConfig(name="chll", host="chll", peer_id="12D3B"),
             },
+            auth=ClusterAuth(user="admin", password="secret"),
         )
-        assert cfg.validate() == []
+        errors, warnings = cfg.validate()
+        assert errors == []
+        assert warnings == []
 
     def test_validate_missing_backup_node(self):
         cfg = CCSConfig(
             backup_node="missing",
             nodes={"nas": NodeConfig(name="nas", host="nas")},
         )
-        errors = cfg.validate()
+        errors, warnings = cfg.validate()
         assert len(errors) == 1
         assert "missing" in errors[0]
 
     def test_validate_missing_profile_primary(self):
         cfg = CCSConfig(
+            backup_node="nas",
             profiles={"hrdag": ProfileConfig(name="hrdag", primary="missing")},
             nodes={"nas": NodeConfig(name="nas", host="nas")},
         )
-        errors = cfg.validate()
+        errors, warnings = cfg.validate()
         assert len(errors) == 1
         assert "missing" in errors[0]
+
+    def test_validate_warnings_for_missing_peer_id(self):
+        cfg = CCSConfig(
+            backup_node="chll",
+            nodes={
+                "nas": NodeConfig(name="nas", host="nas"),  # no peer_id
+                "chll": NodeConfig(name="chll", host="chll", peer_id="12D3"),
+            },
+        )
+        errors, warnings = cfg.validate()
+        assert errors == []
+        assert any("nas" in w and "peer_id" in w for w in warnings)
 
 
 class TestParseConfig:
