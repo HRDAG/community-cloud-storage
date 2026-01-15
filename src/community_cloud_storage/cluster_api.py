@@ -103,7 +103,13 @@ class ClusterClient:
         response = self._request("DELETE", f"/pins/{cid}")
         return response.json()
 
-    def add(self, path: Path, recursive: bool = True, name: str = None) -> list:
+    def add(
+        self,
+        path: Path,
+        recursive: bool = True,
+        name: str = None,
+        allocations: list[str] = None,
+    ) -> list:
         """
         Add a file or directory to the cluster.
 
@@ -111,6 +117,7 @@ class ClusterClient:
             path: Path to file or directory
             recursive: If True and path is directory, add recursively
             name: Pin name for cluster metadata (defaults to filename/dirname)
+            allocations: List of peer IDs for explicit allocation (optional)
 
         Returns:
             List of dicts with 'name' and 'cid' for each added item.
@@ -120,17 +127,25 @@ class ClusterClient:
             name = path.name
 
         if path.is_file():
-            return self._add_file(path, name)
+            return self._add_file(path, name, allocations)
         elif path.is_dir() and recursive:
-            return self._add_directory(path, name)
+            return self._add_directory(path, name, allocations)
         else:
             raise ValueError(f"Path {path} is not a file or directory")
 
-    def _add_file(self, path: Path, name: str) -> list:
+    def _build_add_params(self, name: str, allocations: list[str] = None) -> str:
+        """Build query string for /add endpoint."""
+        params = [f"name={name}"]
+        if allocations:
+            params.append(f"allocations={','.join(allocations)}")
+        return "&".join(params)
+
+    def _add_file(self, path: Path, name: str, allocations: list[str] = None) -> list:
         """Add a single file."""
+        query = self._build_add_params(name, allocations)
         with open(path, "rb") as f:
             files = {"file": (path.name, f)}
-            response = self._request("POST", f"/add?name={name}", files=files)
+            response = self._request("POST", f"/add?{query}", files=files)
 
         # Response is newline-delimited JSON
         results = []
@@ -140,7 +155,7 @@ class ClusterClient:
                 results.append(json.loads(line))
         return results
 
-    def _add_directory(self, path: Path, name: str) -> list:
+    def _add_directory(self, path: Path, name: str, allocations: list[str] = None) -> list:
         """Add a directory recursively using multipart form."""
         # Collect all files with their relative paths
         files_to_add = []
@@ -156,13 +171,15 @@ class ClusterClient:
         files = []
         file_handles = []
 
+        query = self._build_add_params(name, allocations)
+
         try:
             for file_path, rel_path in files_to_add:
                 fh = open(file_path, "rb")
                 file_handles.append(fh)
                 files.append(("file", (rel_path, fh)))
 
-            response = self._request("POST", f"/add?name={name}", files=files)
+            response = self._request("POST", f"/add?{query}", files=files)
         finally:
             for fh in file_handles:
                 fh.close()
