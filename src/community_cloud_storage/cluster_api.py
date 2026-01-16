@@ -14,10 +14,20 @@ Debug logging:
 import json
 import logging
 import os
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
+from requests_toolbelt import MultipartEncoder
+
+# HACKY WORKAROUND: Use curl subprocess for large uploads
+# Python's requests library (even with MultipartEncoder) stalls on multipart
+# uploads with >300 files - TCP send buffer fills to ~2.5MB and hangs indefinitely.
+# Curl handles the same uploads fine. This is a workaround, not a proper fix.
+# TODO: Investigate root cause - possibly requests not using chunked encoding,
+# or MultipartEncoder buffering despite claiming to stream.
+CURL_THRESHOLD_FILES = 250
 
 # Configure logger for this module
 logger = logging.getLogger(__name__)
@@ -167,7 +177,13 @@ class ClusterClient:
         if path.is_file():
             return self._add_file(path, name, allocations, local)
         elif path.is_dir() and recursive:
-            return self._add_directory(path, name, allocations, local)
+            # Count files to decide which method to use
+            file_count = sum(1 for f in path.rglob("*") if f.is_file())
+            if file_count > CURL_THRESHOLD_FILES:
+                logger.info(f"Using curl for {file_count} files (threshold: {CURL_THRESHOLD_FILES})")
+                return self._add_directory_curl(path, name, allocations, local)
+            else:
+                return self._add_directory(path, name, allocations, local)
         else:
             raise ValueError(f"Path {path} is not a file or directory")
 
@@ -207,7 +223,12 @@ class ClusterClient:
     def _add_directory(
         self, path: Path, name: str, allocations: list[str] = None, local: bool = True
     ) -> list:
-        """Add a directory recursively using multipart form."""
+        """Add a directory recursively using streaming multipart form.
+
+        Uses MultipartEncoder from requests_toolbelt to stream data
+        instead of buffering entire form in memory. This is critical
+        for large directories (>300 files or >500MB).
+        """
         # Collect all files with their relative paths
         files_to_add = []
         base_path = path.parent
@@ -219,21 +240,43 @@ class ClusterClient:
 
         logger.debug(f"_add_directory: found {len(files_to_add)} files")
 
-        # Build multipart form with all files
-        # IPFS Cluster expects files with path info in the filename
-        files = []
-        file_handles = []
-
         query = self._build_add_params(name, allocations, local)
         logger.debug(f"_add_directory: query string = {query}")
+
+        # Build streaming multipart encoder
+        # Each field is ("file", (filename, file_handle, content_type))
+        file_handles = []
+        fields = []
 
         try:
             for file_path, rel_path in files_to_add:
                 fh = open(file_path, "rb")
                 file_handles.append(fh)
-                files.append(("file", (rel_path, fh)))
+                fields.append(("file", (rel_path, fh, "application/octet-stream")))
 
-            response = self._request("POST", f"/add?{query}", files=files)
+            # Create streaming encoder
+            encoder = MultipartEncoder(fields=fields)
+            logger.debug(f"_add_directory: encoder content_length = {encoder.len}")
+
+            # Make request with streaming body
+            url = f"{self.base_url}/add?{query}"
+            response = self.session.post(
+                url,
+                data=encoder,
+                headers={"Content-Type": encoder.content_type},
+            )
+
+            # Check for errors
+            if response.status_code == 401:
+                raise ClusterAPIError("Unauthorized: check basic auth credentials", 401)
+            if response.status_code >= 400:
+                try:
+                    error_data = response.json()
+                    msg = error_data.get("message", response.text)
+                except Exception:
+                    msg = response.text
+                raise ClusterAPIError(msg, response.status_code)
+
         finally:
             for fh in file_handles:
                 fh.close()
@@ -248,6 +291,85 @@ class ClusterClient:
 
         logger.debug(f"_add_directory: total entries = {len(results)}")
         return results
+
+    def _add_directory_curl(
+        self, path: Path, name: str, allocations: list[str] = None, local: bool = True
+    ) -> list:
+        """Add a directory using curl subprocess.
+
+        Python's requests library buffers multipart forms in memory and stalls
+        on large uploads (>300 files). Curl handles streaming correctly.
+        """
+        # Collect all files with their relative paths
+        files_to_add = []
+        base_path = path.parent
+
+        for file_path in path.rglob("*"):
+            if file_path.is_file():
+                rel_path = file_path.relative_to(base_path)
+                files_to_add.append((file_path, str(rel_path)))
+
+        logger.debug(f"_add_directory_curl: found {len(files_to_add)} files")
+
+        # Build query string
+        query = self._build_add_params(name, allocations, local)
+
+        # Build curl command
+        url = f"{self.base_url}/add?{query}"
+        cmd = ["curl", "-s", "-X", "POST"]
+
+        # Add auth if configured
+        if self.auth:
+            cmd.extend(["-u", f"{self.auth[0]}:{self.auth[1]}"])
+
+        # Add each file with -F flag
+        for file_path, rel_path in files_to_add:
+            cmd.extend(["-F", f"file=@{file_path};filename={rel_path}"])
+
+        cmd.append(url)
+
+        logger.debug(f"_add_directory_curl: executing curl with {len(files_to_add)} files")
+        logger.debug(f"_add_directory_curl: url = {url}")
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=3600,  # 1 hour timeout for very large uploads
+            )
+
+            logger.debug(f"_add_directory_curl: returncode = {result.returncode}")
+            logger.debug(f"_add_directory_curl: stdout len = {len(result.stdout)}")
+            logger.debug(f"_add_directory_curl: stderr = {result.stderr[:200] if result.stderr else '(empty)'}")
+            if result.stdout:
+                logger.debug(f"_add_directory_curl: stdout first 500 = {result.stdout[:500]}")
+
+            if result.returncode != 0:
+                raise ClusterAPIError(
+                    f"curl failed: {result.stderr}",
+                    status_code=result.returncode
+                )
+
+            # Check for HTTP errors in response
+            if "unauthorized" in result.stdout.lower():
+                raise ClusterAPIError("Unauthorized: check basic auth credentials", 401)
+
+            # Parse NDJSON response
+            results = []
+            for line in result.stdout.strip().split("\n"):
+                if line:
+                    entry = json.loads(line)
+                    results.append(entry)
+                    logger.debug(f"_add_directory_curl: parsed entry = {entry}")
+
+            logger.debug(f"_add_directory_curl: total entries = {len(results)}")
+            return results
+
+        except subprocess.TimeoutExpired:
+            raise ClusterAPIError("curl timeout after 1 hour", status_code=408)
+        except json.JSONDecodeError as e:
+            raise ClusterAPIError(f"Invalid JSON response: {e}", status_code=500)
 
 
 class IPFSClient:
