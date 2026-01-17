@@ -1121,24 +1121,18 @@ See `ntx/docs/design-v2-commit-packaging.md` for full design rationale.
 
 ## Questions for Author
 
-1. **Prototype location**: The doc references `/Users/croblee/dev/hrdag/community-cloud-storage/`.
-   Is this prototype still available? We should coordinate on where the authoritative
-   development happens.
+1. **ntx v2 migration**: The ntx codebase is undergoing a v2 restructuring (see `ntx/TODO.md`).
+   This should stabilize by Monday evening. Should this local dev environment wait for v2,
+   or proceed with current ntx and plan to update later?
 
-2. **ntx v2 migration**: The ntx codebase is undergoing a v2 restructuring (see `ntx/TODO.md`).
-   Should this local dev environment wait for v2 to stabilize, or proceed with
-   current ntx and plan to update later?
-
-3. **Web UI/API**: Are there existing UI/API implementations in the prototype that
-   should be preserved, or is this plan starting fresh?
-
-4. **filelister integration**: The plan mentions simplified filelister-like scanning.
+2. **filelister integration**: The plan mentions simplified filelister-like scanning.
    Should we use actual filelister with `--path` flag (per `ntx/docs/architecture-multi-source-ingest.md`),
    or keep a simplified implementation for local dev?
 
-5. **Database schema**: ntx v2 drops `cid_enc`, `cid_sidecar`, `encrypted_size` columns
-   from paths table (see `ntx/TODO.md` Phase 1). Is your prototype using these columns?
-   If so, migration will be needed.
+3. **Database schema**: ntx v2 drops `cid_enc`, `cid_sidecar`, `encrypted_size` columns
+   from paths table (see `ntx/TODO.md` Phase 1).
 
-6. **Timeline coordination**: Your plan estimates 8 days. The ntx v2 migration is also
-   in progress. Should we sequence these, or can they proceed in parallel?
+4. **PostgreSQL topology**: The prototype uses a single shared PostgreSQL instance.
+   In production, each organization decides where to run their PostgreSQL—on `ben` or
+   locally. We don't yet know what to recommend (depends on `ben`'s latency, which we
+   won't know for months). How should the prototype model this—5 separate databases?
