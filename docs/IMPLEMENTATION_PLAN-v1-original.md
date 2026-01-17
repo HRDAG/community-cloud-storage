@@ -1,11 +1,5 @@
 # Implementation Plan: Full Archival Pipeline with 5-Org Multi-Tenant Setup
 
-<!--
-NOTE FOR AUTHOR: This document has been amended to align with ntx v2 architecture.
-See "Changes from v1 Draft" section at the end for a summary of modifications.
-Original preserved in IMPLEMENTATION_PLAN-v1-original.md
--->
-
 ## Goal
 
 Transform the current prototype to a production-grade local development environment replicating the actual HRDAG deployment to 5 partner NGOs:
@@ -117,13 +111,11 @@ filesystem → filelister → PostgreSQL (scottfiles.paths)
 
 ## NTX Archival Pipeline (8 Stages)
 
-<!-- NOTE: Updated to reflect ntx v2 architecture per ntx/docs/design-v2-commit-packaging.md -->
-
 The API `/archive` endpoint triggers ntx's `ProcessingPipeline` which orchestrates all 8 stages:
 
 ### Stage 1: Collect
 **Module**: `ntx/process.py:_stage_collect()`
-- Query pending files from database (`commit_id IS NULL`)
+- Query pending files from database (`cid_enc IS NULL`)
 - Generate commit_id (ISO timestamp: `2026-01-17T10:30:00Z`)
 - Claim files to prevent duplicate processing
 - Create staging directory: `/staging/commit_<commit_id>/`
@@ -139,8 +131,8 @@ The API `/archive` endpoint triggers ntx's `ProcessingPipeline` which orchestrat
 - Compress with LZ4 frame compression
 - Encrypt with XChaCha20-Poly1305 (PyNaCl libsodium secretstream)
 - Output: `/staging/commit_<id>/files/<content_hash>.enc`
-- Build per-file metadata (encryption params, nonce)
-- Compute metadata_hash = BLAKE3(canonical_json(metadata))
+- Build SignedMetadata structure (file metadata + encryption info)
+- Compute metadata_hash = BLAKE3(canonical_json(SignedMetadata))
 
 ### Stage 4: Build Merkle Tree
 **Module**: `ntx/process.py:_stage_build_tree()` + `ntx/merkle.py:build_tree()`
@@ -149,26 +141,18 @@ The API `/archive` endpoint triggers ntx's `ProcessingPipeline` which orchestrat
 - Generate Merkle proofs for each leaf (siblings + left/right directions)
 - Store merkle_root
 
-### Stage 5: Package
-<!-- NOTE: v2 change - replaces "Write Sidecars" stage -->
-**Module**: `ntx/process.py:_stage_package()` + `ntx/packaging.py`
-- Create tar archive of all `.enc` files (no compression - already encrypted)
-- Split into ~50MB chunks: `split -b 50m archive.tar "${COMMIT_ID}_"`
-- Generate par2 parity files (5% redundancy) for error recovery
-- Delete intermediate `.enc` files after tar creation
-- Output: `~20 chunks + par2 index + par2 parity (~24 files total)`
-
-**Why packaging?** IPFS cluster multipart uploads stall with >300 files. Packaging
-reduces files-per-upload from hundreds to ~24, solving the stall issue while adding
-par2 error correction for durability.
+### Stage 5: Write Sidecars
+**Module**: `ntx/process.py:_stage_write_sidecars()`
+- Create `/staging/commit_<id>/files/<content_hash>.sidecar` JSON
+- Include: SignedMetadata + MerkleProof
+- Allows independent verification of each file's integrity
 
 ### Stage 6: Sign
 **Module**: `ntx/process.py:_stage_sign()` + `ntx/signing.py:sign_merkle_root()`
 - Sign merkle_root with Ed25519 private key
-- Build Manifest v2 JSON with:
+- Build Manifest JSON with:
   - commit_id, merkle_root, leaf_count
-  - Per-file metadata **inline** (content_hash, encryption params, merkle_proof)
-  - Packaging info (chunk_count, chunk_size, par2_redundancy)
+  - File list with content_hash, cid_enc (null initially), paths
   - Ed25519 signature (base64-encoded)
   - Software version, key IDs
 - Write `/staging/commit_<id>/manifest.json`
@@ -180,124 +164,56 @@ par2 error correction for durability.
   - `https://a.pool.opentimestamps.org`
   - `https://b.pool.opentimestamps.org`
 - Receive pending timestamp
-- Write `/staging/commit_<id>/manifest.json.ots` proof file
+- Write `/staging/commit_<id>/merkle_root.ots` proof file
 - Update database: `commits.ots_submitted_at = NOW()`
 - **Note**: Bitcoin confirmation takes hours-to-days. Use `ntx upgrade` command later to check for confirmation.
 
 ### Stage 8: IPFS Upload + S3 Backup
-<!-- NOTE: v2 change - uploads packaged commit (~24 files), not per-file -->
-**Module**: `ntx/ipfs.py:upload()` + `ntx/s3.py:upload()`
+**Module**: `ntx/upload.py:upload()` + `community_cloud_storage.operations.add()`
 
 **IPFS Upload**:
-- Upload packaged commit directory to IPFS cluster (~24 files)
+- Upload entire `/staging/commit_<id>/` directory to IPFS cluster
 - Uses CCS library with profile-based configuration:
   ```python
   from community_cloud_storage.operations import add
-  result = add(
-      path=commit_dir,        # Contains chunks, par2, manifest
-      profile="hrdag",        # or "org2", "org3", etc.
+  entries = add(
+      path=commit_dir,
+      profile="hrdag",  # or "org2", "org3", etc.
       config=ccs_config,
+      recursive=True
   )
   ```
-- CCS determines allocations based on profile
-- Extract single `commit_cid` from result (root directory CID)
+- CCS determines allocations based on profile:
+  - Profile "hrdag" → primary=nas, backup=org3
+  - Cluster allocator picks 3rd replica based on role tags
+- Extract CIDs from result:
+  - `root_cid`: Commit directory CID (is_root=True)
+  - `manifest_cid`: manifest.json CID
+  - `manifest_ots_cid`: merkle_root.ots CID
+  - For each file: `cid_enc`, `cid_sidecar`
 - Update database:
-  - `commits.commit_cid = <root_cid>`
+  - `paths.cid_enc = <file_cid>`, `paths.cid_sidecar = <sidecar_cid>`
+  - `commits.commit_cid = <root_cid>`, `commits.manifest_cid = ...`
   - `commits.uploaded_at = NOW()`
 
 **S3 Backup** (via MinIO):
-- Upload commit directory to S3-compatible storage
-- Key structure: `commits/{commit_id}/{filename}`
+- Optionally upload commit directory to S3-compatible storage
+- Uses rclone or boto3
 - Update database: `commits.s3_uploaded_at = NOW()`
 
-**Output Structure (v2)**:
+**Output Structure**:
 ```
 staging/commit_2026-01-17T10:30:00Z/
-├── 2026-01-17T10:30:00Z_aa       # chunk 1 (~50MB)
-├── 2026-01-17T10:30:00Z_ab       # chunk 2
-├── ...                            # ~20 chunks total
-├── 2026-01-17T10:30:00Z.par2     # par2 index (~50KB)
-├── 2026-01-17T10:30:00Z.vol00+20.par2  # par2 parity (~50MB at 5%)
-├── manifest.json                  # Signed manifest with all metadata
-└── manifest.json.ots              # OpenTimestamps proof
+├── manifest.json              # Signed commit manifest (CID: bafybei...)
+├── merkle_root.ots           # OpenTimestamps proof (CID: bafybei...)
+└── files/
+    ├── a1b2c3d4...f6.enc     # Encrypted file (CID: bafybei...)
+    ├── a1b2c3d4...f6.sidecar # Metadata + proof (CID: bafybei...)
+    ├── e7f8g9h0...12.enc
+    ├── e7f8g9h0...12.sidecar
+    └── ...
 
-# Entire directory gets single commit_cid stored in commits.commit_cid
-# Total: ~24 files, ~1.05GB per commit (1GB data + 5% parity)
-```
-
----
-
-## Manifest Format (v2)
-
-<!-- NOTE: v2 consolidates all per-file metadata into manifest (no sidecars) -->
-
-```json
-{
-  "version": 2,
-  "commit_id": "2026-01-17T10:30:00Z",
-
-  "files": [
-    {
-      "path_hex": "2f686f6d652f757365722f646f632e706466",
-      "path_display": "/home/user/doc.pdf",
-      "size": 12345,
-      "mtime": 1705500000,
-      "content_hash": "blake3:abc123def456...",
-      "metadata_hash": "blake3:789xyz...",
-      "filetype": "application/pdf",
-      "encryption": {
-        "algorithm": "XChaCha20-Poly1305",
-        "key_id": "hrdag-backup-2026",
-        "nonce": "base64-encoded-24-byte-nonce",
-        "compressed": true,
-        "compression_algorithm": "lz4"
-      },
-      "merkle_proof": {
-        "leaf_index": 0,
-        "siblings": ["blake3:sibling1...", "blake3:sibling2..."],
-        "directions": ["L", "R"]
-      }
-    }
-  ],
-
-  "merkle": {
-    "algorithm": "blake3",
-    "root": "blake3:merkle-root-hash...",
-    "leaf_count": 42
-  },
-
-  "signature": {
-    "algorithm": "ed25519",
-    "signer_org": "hrdag",
-    "signer_key_id": "hrdag-signing-2026",
-    "value": "base64-encoded-ed25519-signature"
-  },
-
-  "chain": {
-    "sequence": 305,
-    "previous_commit_id": "2026-01-16T22:00:00Z",
-    "previous_merkle_root": "blake3:previous-root..."
-  },
-
-  "packaging": {
-    "format": "tar+split+par2",
-    "chunk_size": 52428800,
-    "chunk_prefix": "2026-01-17T10:30:00Z_",
-    "chunk_count": 21,
-    "par2_redundancy": 5
-  },
-
-  "provenance": {
-    "organization": "hrdag"
-  },
-
-  "software": {
-    "name": "ntx",
-    "version": "0.2.0"
-  },
-
-  "created_at": "2026-01-17T10:30:00Z"
-}
+# Entire directory gets root CID stored in commits.commit_cid
 ```
 
 ---
@@ -311,21 +227,17 @@ staging/commit_2026-01-17T10:30:00Z/
 
 **Key Architecture**:
 - **UI Responsibility**: Only stages files to `/uploads/<date>/` directory via `POST /upload`
-- **API Responsibility**: Triggers ntx pipeline via `POST /archive`
-- **ntx Responsibility**: Handles encryption, Merkle trees, signing, OTS, packaging, IPFS uploads, S3 backup
+- **API Responsibility**: Triggers ntx pipeline via `POST /archive`, orchestrates all cryptographic operations
+- **ntx Responsibility**: Handles encryption, Merkle trees, signing, OTS, IPFS uploads, S3 backup
 
 **Implementation**:
 ```python
-from pathlib import Path
-from datetime import datetime, timezone
-
 from ntx.process import ProcessingPipeline
 from ntx.crypto import load_encryption_key
 from ntx.signing import load_signing_key
 from ntx.db import Database
-from ntx.ots import submit_and_save
-from ntx import ipfs as ntx_ipfs
-from ntx import s3 as ntx_s3
+from ntx.ots import submit_and_save, upgrade_proof
+from ntx.upload import upload as ntx_upload
 from community_cloud_storage.config import load_config as load_ccs_config
 
 class ArchivalService:
@@ -347,9 +259,9 @@ class ArchivalService:
     def run_pipeline(self, batch_size_gb: float = 0.1) -> dict:
         """Execute full 8-stage ntx pipeline.
 
-        Returns commit details including commit_cid.
+        Returns commit details including CIDs.
         """
-        # Stages 1-6: Collect, Hash, Encrypt, Build Tree, Package, Sign
+        # Stages 1-6: Collect, Hash, Encrypt, Build Tree, Write Sidecars, Sign
         pipeline = ProcessingPipeline(
             db=self.db,
             staging_dir=self.staging_dir,
@@ -367,7 +279,7 @@ class ArchivalService:
         commit_id = result['commit_id']
 
         # Stage 7: OpenTimestamps (Bitcoin anchoring)
-        ots_path = commit_dir / "manifest.json.ots"
+        ots_path = commit_dir / "merkle_root.ots"
         submit_and_save(
             merkle_root_hex=result['merkle_root'],
             output_path=ots_path,
@@ -379,19 +291,14 @@ class ArchivalService:
         )
         self.db.update_commit_timestamp(commit_id, 'ots_submitted_at', datetime.now(timezone.utc))
 
-        # Stage 8: IPFS Upload + S3 Backup
-        ipfs_result = ntx_ipfs.upload(
+        # Stage 8: IPFS Upload (via CCS) + S3 Backup
+        upload_result = ntx_upload(
             commit_dir=commit_dir,
+            db=self.db,
             profile=self.ccs_profile,
             ccs_config=self.ccs_config,
+            force=False,  # Respects OTS confirmation requirement
         )
-        self.db.update_commit_cid(commit_id, ipfs_result.identifier)
-        self.db.update_commit_timestamp(commit_id, 'uploaded_at', ipfs_result.completed_at)
-
-        # Optional S3 backup
-        if self.config.get('s3_enabled'):
-            s3_result = ntx_s3.upload(commit_dir=commit_dir, config=self.s3_config)
-            self.db.update_commit_timestamp(commit_id, 's3_uploaded_at', s3_result.completed_at)
 
         return {
             'status': 'completed',
@@ -399,9 +306,10 @@ class ArchivalService:
             'file_count': result['file_count'],
             'total_size': result['total_size'],
             'merkle_root': result['merkle_root'],
-            'commit_cid': ipfs_result.identifier,
+            'root_cid': upload_result.root_cid,
+            'manifest_cid': upload_result.manifest_cid,
             'ots_submitted': True,
-            'note': 'Commit packaged and uploaded to IPFS cluster with 3 replicas'
+            'note': 'Files encrypted and uploaded to IPFS cluster with 3 replicas'
         }
 
 # FastAPI endpoints
@@ -426,9 +334,9 @@ async def run_archive(batch_size_gb: float = 0.1):
 **Endpoints**:
 - `POST /upload` - Stage file (UI → API, saves to /uploads/)
 - `POST /catalog` - Scan /uploads/ and insert to database
-- `POST /archive` - Trigger full ntx pipeline (returns commit_cid)
+- `POST /archive` - Trigger full ntx pipeline (returns real CIDs)
 - `POST /archive/ots-upgrade` - Check OTS confirmation status
-- `GET /archive/commit/{commit_id}` - Get commit details + CID
+- `GET /archive/commit/{commit_id}` - Get commit details + CIDs
 - `GET /status`, `GET /files`, `GET /commits` - Query data (unchanged)
 
 ### 2. Dependencies
@@ -469,7 +377,7 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# System dependencies (add libmagic for MIME detection, par2 for packaging)
+# System dependencies (add libmagic for MIME detection)
 RUN apt-get update && apt-get install -y \
     findutils \
     postgresql-client \
@@ -477,7 +385,6 @@ RUN apt-get update && apt-get install -y \
     gcc \
     curl \
     libmagic1 \
-    par2 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python packages
@@ -662,32 +569,32 @@ volumes:
 
 **Add Key Generation**:
 ```bash
-echo "Generating cryptographic keys..."
+echo "🔐 Generating cryptographic keys..."
 mkdir -p keys config
 
 # Generate Ed25519 signing keys for each org
 for org in hrdag org2 org3 org4 org5; do
     if [ ! -f "keys/${org}-signing" ]; then
         ssh-keygen -t ed25519 -f "keys/${org}-signing" -N "" -C "${org}@local-dev"
-        echo "Generated Ed25519 signing key for ${org}"
+        echo "✅ Generated Ed25519 signing key for ${org}"
     else
-        echo "Using existing signing key for ${org}"
+        echo "ℹ️  Using existing signing key for ${org}"
     fi
 
     # Generate XChaCha20-Poly1305 encryption keys (32 random bytes)
     if [ ! -f "keys/${org}-encryption.key" ]; then
         openssl rand 32 > "keys/${org}-encryption.key"
         chmod 600 "keys/${org}-encryption.key"
-        echo "Generated encryption key for ${org}"
+        echo "✅ Generated encryption key for ${org}"
     else
-        echo "Using existing encryption key for ${org}"
+        echo "ℹ️  Using existing encryption key for ${org}"
     fi
 done
 
-echo "Creating organization configs..."
+echo "📝 Creating organization configs..."
 ./scripts/create-org-configs.sh
 
-echo "Peer IDs will be extracted after cluster starts..."
+echo "🔍 Peer IDs will be extracted after cluster starts..."
 echo "   Run: docker compose up -d"
 echo "   Then: ./scripts/extract-peer-ids.sh"
 ```
@@ -698,10 +605,10 @@ echo "   Then: ./scripts/extract-peer-ids.sh"
 # scripts/extract-peer-ids.sh
 set -e
 
-echo "Waiting for cluster to start..."
+echo "⏳ Waiting for cluster to start..."
 sleep 30
 
-echo "Extracting IPFS cluster peer IDs..."
+echo "🔍 Extracting IPFS cluster peer IDs..."
 
 for i in 1 2 3 4 5; do
     port=$((9090 + i))
@@ -709,15 +616,15 @@ for i in 1 2 3 4 5; do
     peer_id=$(curl -s http://localhost:${port}/id | jq -r '.id')
 
     if [ -n "$peer_id" ]; then
-        echo "  Node $i: $peer_id"
+        echo "  ✅ Node $i: $peer_id"
         # Update ccs-config.yml with yq or sed
         # (Requires yq installed or use sed)
     else
-        echo "  Failed to get peer ID from node $i"
+        echo "  ❌ Failed to get peer ID from node $i"
     fi
 done
 
-echo "Peer IDs extracted. Restart API services to reload config:"
+echo "✅ Peer IDs extracted. Restart API services to reload config:"
 echo "   docker compose restart hrdag-api org2-api org3-api org4-api org5-api"
 ```
 
@@ -845,7 +752,7 @@ This ensures every CID has 3 replicas across different organizations.
    - Add ntx dependencies (blake3, pynacl, lz4, opentimestamps, cryptography, python-magic)
 
 3. **Update Dockerfile**:
-   - Add libmagic and par2 system packages
+   - Add libmagic system package
    - Install ntx and CCS from local paths (`COPY ../../ntx /tmp/ntx`)
 
 4. **Enhance setup.sh**:
@@ -862,7 +769,7 @@ This ensures every CID has 3 replicas across different organizations.
 6. **Create api/app_ntx.py**:
    - Import ntx modules and CCS
    - Create `ArchivalService` class
-   - Implement `run_pipeline()` method (8 stages including packaging)
+   - Implement `run_pipeline()` method (8 stages)
    - Keep existing endpoints (/upload saves to /uploads/, /catalog scans)
    - Replace `/archive` endpoint with real ntx pipeline trigger
    - Add `/archive/ots-upgrade` and `/archive/resume/{commit_id}`
@@ -873,7 +780,7 @@ This ensures every CID has 3 replicas across different organizations.
    curl -F "file=@test.txt" http://localhost:8001/upload
    curl -X POST http://localhost:8001/catalog
    curl -X POST http://localhost:8001/archive?batch_size_gb=0.01
-   # Verify real CID in response (not "mock-cid-...")
+   # Verify real CIDs in response (not "mock-cid-...")
    ```
 
 ### Phase 3: 5-Org Deployment (Days 5-6)
@@ -921,19 +828,20 @@ This ensures every CID has 3 replicas across different organizations.
 12. **Verify database has real data**:
     ```bash
     docker exec archival-postgres psql -U archival -d scottfiles -c \
-      "SELECT id, commit_cid, merkle_root, leaf_count FROM commits LIMIT 5;"
+      "SELECT commit_id, cid_enc, content_hash, encrypted_size FROM paths WHERE commit_id IS NOT NULL LIMIT 5;"
 
     # Should show:
-    # - Real merkle_root (64 hex chars)
-    # - Real IPFS commit_cid (bafybei...)
-    # - NOT "mock-..."
+    # - Real BLAKE3 hashes (64 hex chars)
+    # - Real IPFS CIDs (bafybei...)
+    # - encrypted_size > 0
+    # - NOT "mock-hash-..." or "mock-cid-..."
     ```
 
 13. **Verify IPFS cluster replication (exactly 3 replicas)**:
     ```bash
-    # Get commit_cid from database
+    # Get a CID from database
     cid=$(docker exec archival-postgres psql -U archival -d scottfiles -t -c \
-      "SELECT commit_cid FROM commits WHERE commit_cid IS NOT NULL LIMIT 1;" | xargs)
+      "SELECT cid_enc FROM paths WHERE cid_enc IS NOT NULL LIMIT 1;" | xargs)
 
     # Check replication status
     curl -s http://localhost:9091/pins/${cid} | jq '.peer_map'
@@ -942,17 +850,15 @@ This ensures every CID has 3 replicas across different organizations.
     # Peers should be from different organizations (hrdag, backup, cross-org)
     ```
 
-14. **Verify packaged commit structure**:
+14. **Verify encrypted files and structure**:
     ```bash
-    docker exec archival-hrdag-api ls -lh /staging/commit_*/
+    docker exec archival-hrdag-api ls -lh /staging/commit_*/files/
 
     # Should show:
-    # - *_aa, *_ab, ... (tar chunks, ~50MB each)
-    # - *.par2 (par2 index)
-    # - *.vol00+NN.par2 (par2 parity)
-    # - manifest.json (with Ed25519 signature, all file metadata)
-    # - manifest.json.ots (OpenTimestamps proof)
-    # Total: ~24 files
+    # - *.enc files (encrypted content with LZ4+XChaCha20)
+    # - *.sidecar files (metadata + Merkle proof)
+    # - manifest.json (with Ed25519 signature)
+    # - merkle_root.ots (OpenTimestamps proof)
     ```
 
 15. **Verify OpenTimestamps submission**:
@@ -975,7 +881,7 @@ This ensures every CID has 3 replicas across different organizations.
     ```bash
     open http://localhost:9001  # MinIO web console
     # Login: minioadmin / minioadmin123
-    # Should see "archival" bucket with commits/{commit_id}/ directories
+    # Should see "archival" bucket (if S3 upload enabled)
     ```
 
 ---
@@ -991,15 +897,15 @@ After implementation, confirm:
 - [ ] CCS config has real peer IDs populated (not empty strings)
 - [ ] Peer IDs match between CCS config and cluster `/id` endpoints
 - [ ] Upload → Catalog → Archive workflow completes without errors
-- [ ] Database commits table shows real merkle_root (64 hex chars)
-- [ ] Database commits table shows real commit_cid (bafybei...)
-- [ ] Staging contains packaged commits: chunks, par2, manifest.json
+- [ ] Database shows BLAKE3 content_hash (64 hex chars, not "mock-hash-...")
+- [ ] Database shows real IPFS CIDs starting with "bafybei..."
+- [ ] Database shows encrypted_size > original size (due to encryption overhead)
+- [ ] Encrypted files exist in staging: `*.enc`, `*.sidecar`, `manifest.json`
 - [ ] manifest.json contains valid Ed25519 signature (88 base64 chars)
-- [ ] manifest.json contains per-file metadata with merkle_proof inline
-- [ ] manifest.json.ots file exists and is valid OTS proof
-- [ ] **IPFS cluster shows exactly 3 replicas per commit_cid** (not 2, not 4-5)
+- [ ] merkle_root.ots file exists and is valid OTS proof
+- [ ] **IPFS cluster shows exactly 3 replicas per CID** (not 2, not 4-5)
 - [ ] Replicas are on different nodes (check role tags match allocation strategy)
-- [ ] MinIO console shows uploaded commits (if S3 backup enabled)
+- [ ] MinIO console shows uploaded files (if S3 backup enabled)
 - [ ] No errors in docker logs: `docker compose logs -f`
 - [ ] Cluster peers all show "trusted" status: `curl http://localhost:9091/peers | jq`
 
@@ -1018,22 +924,21 @@ After implementation, confirm:
 
 ### Production Parity Achieved
 
-- Full cryptographic operations (XChaCha20-Poly1305 encryption, LZ4 compression)
-- Real BLAKE3 content hashing
-- Real Merkle tree construction with proofs
-- Real Ed25519 signatures
-- Real OpenTimestamps (Bitcoin anchoring via public calendars)
-- Real IPFS cluster uploads with 3-replica replication
-- Role-based allocation (primary/backup/cross-org tags)
-- Profile-based CCS configuration (matching production org setup)
-- Decoupled workflow (UI stages → API triggers → ntx orchestrates)
-- **Commit packaging (tar+split+par2) matching v2 architecture**
+- ✅ Full cryptographic operations (XChaCha20-Poly1305 encryption, LZ4 compression)
+- ✅ Real BLAKE3 content hashing
+- ✅ Real Merkle tree construction with proofs
+- ✅ Real Ed25519 signatures
+- ✅ Real OpenTimestamps (Bitcoin anchoring via public calendars)
+- ✅ Real IPFS cluster uploads with 3-replica replication
+- ✅ Role-based allocation (primary/backup/cross-org tags)
+- ✅ Profile-based CCS configuration (matching production org setup)
+- ✅ Decoupled workflow (UI stages → API triggers → ntx orchestrates)
 
 ---
 
 ## Replication Strategy Details
 
-**Goal**: Ensure exactly 3 replicas per commit across different organizations
+**Goal**: Ensure exactly 3 replicas per CID across different organizations
 
 **Configuration**:
 ```yaml
@@ -1048,7 +953,7 @@ environment:
 **How It Works**:
 1. When HRDAG uploads via `ccs add --profile hrdag`:
    - CCS reads profile config: `primary: hrdag-nas`
-   - ntx calls `ipfs.upload(commit_dir, profile="hrdag", ccs_config)`
+   - ntx calls `operations.add(path, profile="hrdag", ccs_config)`
    - CCS determines explicit allocation: `[hrdag-nas-peer-id]`
    - Sends to cluster REST API: `POST /add?allocations=12D3KooW...`
 
@@ -1070,10 +975,10 @@ environment:
 
 **Verification**:
 ```bash
-curl http://localhost:9091/pins/<commit_cid> | jq '.peer_map | length'
+curl http://localhost:9091/pins/<CID> | jq '.peer_map | length'
 # Should return: 3
 
-curl http://localhost:9091/pins/<commit_cid> | jq '.peer_map | keys'
+curl http://localhost:9091/pins/<CID> | jq '.peer_map | keys'
 # Should return: ["12D3KooW...", "12D3KooW...", "12D3KooW..."]
 # Three different peer IDs
 ```
@@ -1083,7 +988,7 @@ curl http://localhost:9091/pins/<commit_cid> | jq '.peer_map | keys'
 ## Summary
 
 This plan transforms the prototype into a production-grade 5-organization archival system with:
-- **8-stage ntx v2 pipeline** with commit packaging (tar+split+par2)
+- **8-stage ntx pipeline** replacing all mock operations
 - **5 separate org instances** (HRDAG + 4 partners) demonstrating realistic multi-tenant deployment
 - **Real cryptography** (encryption, compression, signatures, Merkle trees, OpenTimestamps)
 - **IPFS cluster integration** via CCS with role-based replication ensuring exactly 3 replicas
@@ -1093,52 +998,3 @@ This plan transforms the prototype into a production-grade 5-organization archiv
 **Implementation time**: ~8 days (1-2 days per phase + 2 days testing)
 
 **Next steps**: Approve plan and begin Phase 1 (Foundation)
-
----
-
-## Changes from v1 Draft
-
-This document was amended to align with ntx v2 architecture. Key changes:
-
-| Section | v1 (Original) | v2 (Amended) |
-|---------|---------------|--------------|
-| Stage 1 query | `cid_enc IS NULL` | `commit_id IS NULL` |
-| Stage 5 | Write Sidecars (*.sidecar files) | Package (tar+split+par2) |
-| Stage 6 manifest | References external sidecars | All per-file metadata inline |
-| Stage 8 upload | Per-file CIDs tracked | Single commit_cid per commit |
-| Output structure | Hundreds of .enc/.sidecar files | ~24 files (chunks + par2 + manifest) |
-| DB columns | `cid_enc`, `cid_sidecar` per file | `commit_cid` per commit only |
-| Backend modules | `upload.py`, `rclone.py` | `ipfs.py`, `s3.py` |
-| Dockerfile | No par2 | Includes par2 package |
-
-**Why v2?** IPFS cluster multipart uploads stall with >300 files. The v2 packaging
-approach reduces files-per-upload from hundreds to ~24, solving this issue while
-adding par2 error correction for data durability.
-
-See `ntx/docs/design-v2-commit-packaging.md` for full design rationale.
-
----
-
-## Questions for Author
-
-1. **Prototype location**: The doc references `/Users/croblee/dev/hrdag/community-cloud-storage/`.
-   Is this prototype still available? We should coordinate on where the authoritative
-   development happens.
-
-2. **ntx v2 migration**: The ntx codebase is undergoing a v2 restructuring (see `ntx/TODO.md`).
-   Should this local dev environment wait for v2 to stabilize, or proceed with
-   current ntx and plan to update later?
-
-3. **Web UI/API**: Are there existing UI/API implementations in the prototype that
-   should be preserved, or is this plan starting fresh?
-
-4. **filelister integration**: The plan mentions simplified filelister-like scanning.
-   Should we use actual filelister with `--path` flag (per `ntx/docs/architecture-multi-source-ingest.md`),
-   or keep a simplified implementation for local dev?
-
-5. **Database schema**: ntx v2 drops `cid_enc`, `cid_sidecar`, `encrypted_size` columns
-   from paths table (see `ntx/TODO.md` Phase 1). Is your prototype using these columns?
-   If so, migration will be needed.
-
-6. **Timeline coordination**: Your plan estimates 8 days. The ntx v2 migration is also
-   in progress. Should we sequence these, or can they proceed in parallel?
