@@ -74,6 +74,24 @@ Node deployment is managed by Ansible. See:
 
 The `ccs create` and `ccs clone` commands still exist but are deprecated. Use Ansible for all node deployments.
 
+### For Developers (Local Testing)
+
+Run the complete archival pipeline locally with Docker:
+
+```bash
+cd deployment/local
+./setup.sh
+docker compose up -d
+```
+
+This starts:
+- PostgreSQL with filelister + ntx schemas
+- 3-node IPFS cluster with replication
+- Archival API (FastAPI)
+- Web UI (Vue.js) at http://localhost:3000
+
+See [deployment/local/START-HERE.md](deployment/local/START-HERE.md) for a quick start guide, or [deployment/local/README.md](deployment/local/README.md) for full documentation.
+
 ## Tailscale Setup
 
 Your IPFS Cluster runs in a virtual private mesh network using Tailscale. Tailscale is a service built on open source Wireguard. The free tier is sufficient for most clusters.

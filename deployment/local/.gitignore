@@ -1,0 +1,41 @@
+# Generated secrets and config
+ccs-config/
+*.key
+*.txt
+
+# Node modules
+node_modules/
+package-lock.json
+
+# Build artifacts
+dist/
+build/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Environment
+.env
+.env.local
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Temporary files
+*.tmp
+*.bak
