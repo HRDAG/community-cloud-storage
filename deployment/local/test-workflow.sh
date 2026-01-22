@@ -102,8 +102,8 @@ echo "✅ Step 9: Listing archived files..."
 ARCHIVED_RESPONSE=$(curl -s "$API_URL/files?archived_only=true&limit=5")
 ARCHIVED_COUNT=$(echo "$ARCHIVED_RESPONSE" | jq -r '.files | length')
 echo "   Found $ARCHIVED_COUNT archived files:"
-echo "$ARCHIVED_RESPONSE" | jq -r '.files[] | "   - \(.path | @base64d) (CID: \(.cid_enc // "N/A"))"' 2>/dev/null || \
-echo "$ARCHIVED_RESPONSE" | jq -r '.files[] | "   - \(.path) (CID: \(.cid_enc // "N/A"))"'
+echo "$ARCHIVED_RESPONSE" | jq -r '.files[] | "   - \(.path | @base64d) (Commit: \(.commit_id // "N/A"))"' 2>/dev/null || \
+echo "$ARCHIVED_RESPONSE" | jq -r '.files[] | "   - \(.path) (Commit: \(.commit_id // "N/A"))"'
 echo ""
 
 # Check IPFS cluster

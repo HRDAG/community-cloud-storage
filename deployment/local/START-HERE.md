@@ -20,7 +20,7 @@ cd deployment/local && ./setup.sh
 docker compose up -d
 
 # 3. Open web UI
-open http://localhost:3000
+open http://localhost:8000
 ```
 
 Wait ~30 seconds for services to start, then use the web interface to:
@@ -78,8 +78,8 @@ docker compose down -v
 
 ## 🎯 What to Do Next
 
-1. **Try the workflow** - Upload files via http://localhost:3000
-2. **Explore the API** - http://localhost:8000/docs
+1. **Try the workflow** - Upload files via http://localhost:8000
+2. **Explore the API** - http://localhost:8000/api
 3. **Query the database** - `docker exec -it archival-postgres psql -U archival -d scottfiles`
 4. **Check the cluster** - `curl http://localhost:9094/peers | jq`
 

@@ -87,8 +87,7 @@ docker compose up -d
 This starts:
 - PostgreSQL with filelister + ntx schemas
 - 3-node IPFS cluster with replication
-- Archival API (FastAPI)
-- Web UI (Vue.js) at http://localhost:3000
+- Web UI + API (single container) at http://localhost:8000
 
 See [deployment/local/START-HERE.md](deployment/local/START-HERE.md) for a quick start guide, or [deployment/local/README.md](deployment/local/README.md) for full documentation.
 
