@@ -148,14 +148,14 @@ services:
         ipv4_address: 172.30.0.33
 
   # ============================================================================
-  # ARCHIVAL API SERVICE
+  # WEB UI + API (Single Container)
   # ============================================================================
 
-  archival-api:
+  webapp:
     build:
-      context: ../../api
-      dockerfile: Dockerfile
-    container_name: archival-api
+      context: ../..
+      dockerfile: api/Dockerfile
+    container_name: archival-webapp
     depends_on:
       postgres:
         condition: service_healthy
@@ -170,33 +170,11 @@ services:
     volumes:
       - upload-data:/uploads
       - staging-data:/staging
-      - ../filelister:/app/filelister
-      - ../ntx:/app/ntx
-      - .:/app/community-cloud-storage
     ports:
       - "8000:8000"
     networks:
       archival-net:
         ipv4_address: 172.30.0.40
-
-  # ============================================================================
-  # WEB UI
-  # ============================================================================
-
-  web-ui:
-    build:
-      context: ../../ui
-      dockerfile: Dockerfile
-    container_name: archival-web-ui
-    depends_on:
-      - archival-api
-    environment:
-      - VITE_API_URL=http://localhost:8000
-    ports:
-      - "3000:80"
-    networks:
-      archival-net:
-        ipv4_address: 172.30.0.50
 
 volumes:
   postgres-data:

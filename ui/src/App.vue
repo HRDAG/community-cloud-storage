@@ -107,9 +107,8 @@
               <span class="file-size">{{ formatBytes(file.size) }}</span>
             </div>
             <div class="file-meta">
-              <span v-if="file.cid_enc" class="file-cid">CID: {{ file.cid_enc.substring(0, 20) }}...</span>
               <span v-if="file.commit_id" class="file-commit">Commit: {{ file.commit_id.substring(0, 19) }}</span>
-              <span v-if="!file.cid_enc" class="file-status pending">⏳ Pending</span>
+              <span v-if="!file.commit_id" class="file-status pending">⏳ Pending</span>
               <span v-else class="file-status archived">✅ Archived</span>
             </div>
           </div>
@@ -122,7 +121,7 @@
 <script>
 import axios from 'axios'
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+const API_URL = import.meta.env.VITE_API_URL || ''
 
 export default {
   name: 'App',

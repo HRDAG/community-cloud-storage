@@ -13,6 +13,7 @@ from datetime import datetime
 from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings
 import psycopg
@@ -81,9 +82,9 @@ class FileInfo(BaseModel):
 # API ENDPOINTS
 # ============================================================================
 
-@app.get("/")
-async def root():
-    """API health check"""
+@app.get("/api")
+async def api_info():
+    """API information endpoint"""
     return {
         "service": "Archival API",
         "version": "0.1.0",
@@ -145,8 +146,7 @@ async def get_status():
                 cur.execute("""
                     SELECT COUNT(*) as count, COALESCE(SUM(size), 0) as total_size
                     FROM paths
-                    WHERE cid_enc IS NULL
-                      AND commit_id IS NULL
+                    WHERE commit_id IS NULL
                       AND deleted_at_run IS NULL
                       AND filetype = 'f'
                 """)
@@ -191,7 +191,7 @@ async def list_files(limit: int = 100, offset: int = 0, archived_only: bool = Fa
             with conn.cursor(row_factory=dict_row) as cur:
                 where_clause = ""
                 if archived_only:
-                    where_clause = "WHERE cid_enc IS NOT NULL"
+                    where_clause = "WHERE commit_id IS NOT NULL"
 
                 cur.execute(f"""
                     SELECT
@@ -311,8 +311,7 @@ async def run_archive(
                 cur.execute("""
                     SELECT encode(path, 'escape') as path, size, mtime
                     FROM paths
-                    WHERE cid_enc IS NULL
-                      AND commit_id IS NULL
+                    WHERE commit_id IS NULL
                       AND deleted_at_run IS NULL
                       AND filetype = 'f'
                     ORDER BY size ASC
@@ -422,6 +421,16 @@ async def list_commits(limit: int = 50):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to list commits: {str(e)}")
+
+
+# ============================================================================
+# SERVE STATIC FILES (Vue UI)
+# ============================================================================
+
+# Mount static files last so API routes take precedence
+static_dir = Path(__file__).parent / "static"
+if static_dir.exists():
+    app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
 
 
 if __name__ == "__main__":

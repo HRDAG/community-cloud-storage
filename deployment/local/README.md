@@ -12,20 +12,12 @@ New here? Start with **[START-HERE.md](START-HERE.md)** for a 3-command setup.
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│              Web UI (Vue.js)                         │
-│  http://localhost:3000                              │
-│  - Drag & drop file upload                          │
-│  - Browse archived files                            │
-│  - View CIDs and commits                            │
-└─────────────┬───────────────────────────────────────┘
-              │ HTTP API
-┌─────────────▼───────────────────────────────────────┐
-│         Archival API (FastAPI)                      │
+│         Web UI + API (Single Container)             │
 │  http://localhost:8000                              │
-│  - Accept uploads                                   │
-│  - Catalog files (filelister-like)                  │
-│  - Archive workflow (ntx-like)                      │
-│  - Query database for status                        │
+│  - Vue.js UI with drag & drop upload               │
+│  - Browse archived files and commits                │
+│  - FastAPI backend serving both UI and API          │
+│  - Accept uploads and run archival workflow         │
 └─────────────┬───────────────────────────────────────┘
               │
 ┌─────────────▼───────────────────────────────────────┐
@@ -100,7 +92,7 @@ Wait ~30 seconds for all services to start.
 
 ### 4. Access the UI
 
-Open your browser to: **http://localhost:3000**
+Open your browser to: **http://localhost:8000**
 
 ### 5. Test the Workflow
 
@@ -153,9 +145,9 @@ Connect to PostgreSQL:
 docker exec -it archival-postgres psql -U archival -d scottfiles
 
 # Example queries
-SELECT COUNT(*) FROM paths WHERE cid_enc IS NULL;  -- Pending files
+SELECT COUNT(*) FROM paths WHERE commit_id IS NULL;  -- Pending files
 SELECT * FROM commits ORDER BY sequence DESC LIMIT 5;  -- Recent commits
-SELECT encode(path, 'escape') as path, size, cid_enc FROM paths LIMIT 10;
+SELECT encode(path, 'escape') as path, size, commit_id FROM paths LIMIT 10;
 ```
 
 ## IPFS Cluster Access
@@ -226,11 +218,11 @@ cd ../../ui
 # Install dependencies
 npm install
 
-# Run dev server
+# Run dev server (UI only, API must be running separately)
 npm run dev
 ```
 
-Access at: http://localhost:5173
+Access at: http://localhost:5173 (API at http://localhost:8000)
 
 ## Stopping the Stack
 
