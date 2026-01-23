@@ -24,7 +24,7 @@ CREATE TABLE paths (
 );
 
 CREATE UNIQUE INDEX idx_paths_unique ON paths (path, size, mtime);
-CREATE INDEX idx_paths_commit_id ON paths(commit_id) WHERE commit_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_paths_commit_id ON paths(commit_id) WHERE commit_id IS NOT NULL;
 CREATE INDEX idx_paths_cid_enc ON paths(cid_enc) WHERE cid_enc IS NOT NULL;
 
 -- Staging table (unlogged for performance)
