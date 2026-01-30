@@ -198,6 +198,21 @@ def add(
             error=f"Unexpected error: {e}",
         )
 
+    # Validate entries_raw is not empty (safety net)
+    # This should never happen after Step 2 error detection, but provides defense in depth
+    if not entries_raw:
+        return AddResult(
+            root_cid="",
+            root_path=str(path),
+            entries=[],
+            allocations=allocations,
+            profile=profile,
+            added_at=datetime.now(timezone.utc),
+            cluster_host=target_host,
+            returncode=RC_FAILED,
+            error="No entries returned from cluster (possible server error)",
+        )
+
     # Root is the last entry from IPFS
     root_cid = entries_raw[-1].get("cid", "") if entries_raw else ""
 
