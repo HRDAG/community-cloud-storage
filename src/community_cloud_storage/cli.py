@@ -384,14 +384,48 @@ def rm(cid: str, cluster_peername: str, basic_auth_file: Path) -> None:
 
 @cli.command()
 @click.argument("cid", required=True)
-@click.option("--cluster-peername", required=True, callback=validate_peername)
-@click.option("--output", type=click.Path(exists=False, path_type=Path), required=True)
+@click.option(
+    "--dest",
+    type=click.Path(path_type=Path),
+    required=True,
+    help="Destination path for downloaded content",
+)
+@click.option(
+    "--profile",
+    help="Organization profile (prefers profile's primary node for download)",
+)
+@click.option(
+    "--config-file",
+    type=click.Path(exists=True, path_type=Path),
+    help="Config file path (default: ~/.ccs/config.yml)",
+)
+@click.option(
+    "--host",
+    callback=validate_peername,
+    help="Override cluster host for status query (default: from config)",
+)
 @handle_api_error
-def get(cid: str, cluster_peername: str, output: Path) -> None:
+def get(cid: str, dest: Path, profile: str, config_file: Path, host: str) -> None:
     """
-    Get contents of a file and write to a file.
+    Download content from IPFS cluster by CID.
+
+    Downloads the content at CID to the destination path. If CID is a directory,
+    downloads the entire directory structure.
+
+    Examples:
+
+        # Download file
+        ccs get QmTEST --dest ./output.txt
+
+        # Download directory
+        ccs get QmDIR --dest ./restored-dir/
+
+        # Download preferring hrdag's primary node
+        ccs get QmTEST --dest ./output.txt --profile hrdag
     """
-    compose.get(cid, host=cluster_peername, output=output)
+    config = config_module.load_config(config_file)
+    operations.get(cid=cid, dest=dest, config=config, profile=profile, host=host)
+    click.echo(f"Downloaded {cid} to {dest}")
 
 
 # =============================================================================

@@ -16,7 +16,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from community_cloud_storage.cluster_api import ClusterClient, ClusterAPIError
+import requests
+
+from community_cloud_storage.cluster_api import ClusterClient, ClusterAPIError, IPFSClient
 from community_cloud_storage.config import CCSConfig
 from community_cloud_storage.types import (
     AddResult,
@@ -412,3 +414,105 @@ def ls(
     raw_pins = client.pins()
 
     return [PinStatus.from_cluster_status(p) for p in raw_pins]
+
+
+def _select_download_peer(
+    pin_status: PinStatus,
+    config: CCSConfig,
+    profile: Optional[str] = None,
+) -> str:
+    """
+    Select which peer to download from based on pin status and profile.
+
+    Args:
+        pin_status: Pin status with peer_map
+        config: CCSConfig with nodes
+        profile: Optional profile name (prefers primary)
+
+    Returns:
+        Host (IP or hostname) of selected peer from config
+
+    Raises:
+        CCSError: If no peers have pinned content
+        ConfigError: If profile specified but not found
+    """
+    pinned_peers = [
+        peer_id for peer_id, peer_status in pin_status.peer_map.items()
+        if peer_status.status == "pinned"
+    ]
+
+    if not pinned_peers:
+        raise CCSError(f"No peers have pinned CID {pin_status.cid}")
+
+    # Prefer profile's primary node if specified
+    if profile:
+        primary_node = config.get_primary_for_profile(profile)
+        if not primary_node:
+            raise ConfigError(f"Profile '{profile}' not found in config")
+
+        if primary_node.peer_id in pinned_peers:
+            return primary_node.host
+
+    # Fallback: use first pinned peer, look up host in config
+    selected_peer_id = pinned_peers[0]
+    for node_config in config.nodes.values():
+        if node_config.peer_id == selected_peer_id:
+            return node_config.host
+
+    # Last resort: use peername from status (may not resolve)
+    return pin_status.peer_map[selected_peer_id].peername
+
+
+def get(
+    cid: str,
+    dest: Path,
+    config: CCSConfig,
+    profile: Optional[str] = None,
+    host: str = None,
+) -> None:
+    """
+    Download content from IPFS cluster by CID.
+
+    Queries the cluster to find which peers have the content pinned,
+    then downloads from a peer using the IPFS gateway.
+
+    Args:
+        cid: IPFS CID to retrieve
+        dest: Destination path for downloaded content
+        config: CCSConfig with auth and node information
+        profile: Optional profile name (prefers profile's primary node)
+        host: Override which cluster node to query for status
+
+    Raises:
+        ClusterAPIError: If CID not found or download fails
+        ConfigError: If profile not found in config
+        CCSError: If no peers have pinned content
+
+    Examples:
+        # Download using any available peer
+        get("QmTEST", Path("output.txt"), config)
+
+        # Download preferring hrdag's primary node
+        get("QmTEST", Path("output.txt"), config, profile="hrdag")
+    """
+    pin_status = status(cid, config, host)
+    download_host = _select_download_peer(pin_status, config, profile)
+
+    # Check if CID is a directory by doing HEAD request
+    base_url = f"http://{download_host}:8080/ipfs/{cid}"
+    head_response = requests.head(base_url, allow_redirects=True)
+    content_type = head_response.headers.get("Content-Type", "")
+
+    # If directory (text/html response), use format=tar to get archive instead of HTML
+    # If file, download directly without format parameter
+    if "text/html" in content_type or "directory" in content_type:
+        url = f"{base_url}?format=tar"
+    else:
+        url = base_url
+
+    response = requests.get(url, stream=True)
+    response.raise_for_status()
+
+    with open(dest, "wb") as f:
+        for chunk in response.iter_content(chunk_size=8192):
+            f.write(chunk)

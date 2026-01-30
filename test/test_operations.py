@@ -26,8 +26,10 @@ from community_cloud_storage.operations import (
     _get_allocations,
     AllocationError,
     ConfigError,
+    CCSError,
 )
 from community_cloud_storage.types import RC_FAILED, RC_CONFIG_ERROR
+from community_cloud_storage.cluster_api import ClusterAPIError
 
 
 @pytest.fixture
@@ -238,3 +240,189 @@ class TestPeers:
         assert len(result) == 2
         assert result[0].name == "nas"
         assert result[1].name == "meerkat"
+
+
+class TestGet:
+    """Tests for get() operation."""
+
+    @patch("community_cloud_storage.operations.status")
+    def test_get_nonexistent_cid_raises(self, mock_status, sample_config):
+        """Should raise ClusterAPIError for non-existent CID."""
+        from community_cloud_storage.operations import get
+
+        # Mock status to raise ClusterAPIError (CID not found)
+        mock_status.side_effect = ClusterAPIError("CID not found", 404)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest = Path(tmpdir) / "output"
+            with pytest.raises(ClusterAPIError, match="not found"):
+                get(cid="bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+                    dest=dest, config=sample_config)
+
+    @patch("community_cloud_storage.operations.status")
+    def test_get_unknown_profile_raises(self, mock_status, sample_config):
+        """Should raise ConfigError for unknown profile."""
+        from community_cloud_storage.operations import get
+        from community_cloud_storage.types import PinStatus, PeerPinStatus
+
+        # Mock status to return a valid pin status (so we reach profile check)
+        mock_status.return_value = PinStatus(
+            cid="QmTEST", name="test", allocations=["12D3KooWNAS"],
+            peer_map={"12D3KooWNAS": PeerPinStatus("nas", "pinned", None)},
+            replication_factor_min=2, replication_factor_max=4,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest = Path(tmpdir) / "output"
+            with pytest.raises(ConfigError, match="Profile.*not found"):
+                get(cid="QmTEST", dest=dest, config=sample_config, profile="nonexistent")
+
+    def test_get_no_pinned_peers_raises(self, sample_config):
+        """Should raise error if no peers have pinned the content."""
+        from community_cloud_storage.operations import get
+        from community_cloud_storage.types import PinStatus, PeerPinStatus
+
+        with patch("community_cloud_storage.operations.status") as mock_status:
+            mock_status.return_value = PinStatus(
+                cid="QmTEST", name=None, allocations=[], peer_map={},
+                replication_factor_min=None, replication_factor_max=None,
+            )
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                dest = Path(tmpdir) / "output"
+                with pytest.raises(CCSError, match="No peers have pinned"):
+                    get(cid="QmTEST", dest=dest, config=sample_config)
+
+    @patch("community_cloud_storage.operations.requests")
+    @patch("community_cloud_storage.operations.status")
+    def test_get_file_success(self, mock_status, mock_requests, sample_config):
+        """Should download file from peer with pinned content."""
+        from community_cloud_storage.operations import get
+        from community_cloud_storage.types import PinStatus, PeerPinStatus
+
+        mock_status.return_value = PinStatus(
+            cid="QmTEST", name="test", allocations=["12D3KooWNAS"],
+            peer_map={"12D3KooWNAS": PeerPinStatus("nas", "pinned", None)},
+            replication_factor_min=2, replication_factor_max=4,
+        )
+
+        # Mock HEAD response (file, not directory)
+        mock_head = MagicMock()
+        mock_head.headers = {"Content-Type": "application/octet-stream"}
+        mock_requests.head.return_value = mock_head
+
+        # Mock GET response
+        mock_get = MagicMock()
+        mock_get.iter_content.return_value = [b"test content"]
+        mock_requests.get.return_value = mock_get
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest = Path(tmpdir) / "test.txt"
+            get(cid="QmTEST", dest=dest, config=sample_config)
+
+            # Verify HEAD was called to detect type
+            mock_requests.head.assert_called_once_with("http://nas:8080/ipfs/QmTEST", allow_redirects=True)
+            # Verify GET was called without format=tar for files
+            mock_requests.get.assert_called_once_with("http://nas:8080/ipfs/QmTEST", stream=True)
+            assert dest.read_bytes() == b"test content"
+
+    @patch("community_cloud_storage.operations.requests")
+    @patch("community_cloud_storage.operations.status")
+    def test_get_directory_with_format_tar(self, mock_status, mock_requests, sample_config):
+        """Should use format=tar for directories to avoid HTML listing."""
+        from community_cloud_storage.operations import get
+        from community_cloud_storage.types import PinStatus, PeerPinStatus
+
+        mock_status.return_value = PinStatus(
+            cid="QmDIR", name="test",
+            allocations=["12D3KooWNAS"],
+            peer_map={"12D3KooWNAS": PeerPinStatus("nas", "pinned", None)},
+            replication_factor_min=2, replication_factor_max=4,
+        )
+
+        # Mock HEAD response (directory - returns text/html)
+        mock_head = MagicMock()
+        mock_head.headers = {"Content-Type": "text/html; charset=utf-8"}
+        mock_requests.head.return_value = mock_head
+
+        # Mock GET response
+        mock_get = MagicMock()
+        mock_get.iter_content.return_value = [b"tar archive content"]
+        mock_requests.get.return_value = mock_get
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest = Path(tmpdir) / "archive.tar"
+            get(cid="QmDIR", dest=dest, config=sample_config)
+
+            # Verify HEAD was called to detect directory
+            mock_requests.head.assert_called_once_with("http://nas:8080/ipfs/QmDIR", allow_redirects=True)
+            # Verify GET was called with format=tar for directories
+            mock_requests.get.assert_called_once_with("http://nas:8080/ipfs/QmDIR?format=tar", stream=True)
+            assert dest.read_bytes() == b"tar archive content"
+
+    @patch("community_cloud_storage.operations.requests")
+    @patch("community_cloud_storage.operations.status")
+    def test_get_with_profile_prefers_primary(self, mock_status, mock_requests, sample_config):
+        """Should prefer profile's primary node when available."""
+        from community_cloud_storage.operations import get
+        from community_cloud_storage.types import PinStatus, PeerPinStatus
+
+        mock_status.return_value = PinStatus(
+            cid="QmTEST", name="test",
+            allocations=["12D3KooWNAS", "12D3KooWCHLL"],
+            peer_map={
+                "12D3KooWNAS": PeerPinStatus("nas", "pinned", None),
+                "12D3KooWCHLL": PeerPinStatus("chll", "pinned", None),
+            },
+            replication_factor_min=2, replication_factor_max=4,
+        )
+
+        # Mock HEAD response (file)
+        mock_head = MagicMock()
+        mock_head.headers = {"Content-Type": "application/octet-stream"}
+        mock_requests.head.return_value = mock_head
+
+        # Mock GET response
+        mock_get = MagicMock()
+        mock_get.iter_content.return_value = [b"test content"]
+        mock_requests.get.return_value = mock_get
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest = Path(tmpdir) / "test.txt"
+            get(cid="QmTEST", dest=dest, config=sample_config, profile="hrdag")
+
+            # hrdag profile has nas as primary - should use nas host
+            mock_requests.head.assert_called_once_with("http://nas:8080/ipfs/QmTEST", allow_redirects=True)
+            mock_requests.get.assert_called_once_with("http://nas:8080/ipfs/QmTEST", stream=True)
+
+    @patch("community_cloud_storage.operations.requests")
+    @patch("community_cloud_storage.operations.status")
+    def test_get_fallback_to_backup(self, mock_status, mock_requests, sample_config):
+        """Should fallback to backup if primary doesn't have content."""
+        from community_cloud_storage.operations import get
+        from community_cloud_storage.types import PinStatus, PeerPinStatus
+
+        mock_status.return_value = PinStatus(
+            cid="QmTEST", name="test",
+            allocations=["12D3KooWCHLL"],  # Only backup has it
+            peer_map={"12D3KooWCHLL": PeerPinStatus("chll", "pinned", None)},
+            replication_factor_min=2, replication_factor_max=4,
+        )
+
+        # Mock HEAD response (file)
+        mock_head = MagicMock()
+        mock_head.headers = {"Content-Type": "text/plain"}
+        mock_requests.head.return_value = mock_head
+
+        # Mock GET response
+        mock_get = MagicMock()
+        mock_get.iter_content.return_value = [b"test content"]
+        mock_requests.get.return_value = mock_get
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest = Path(tmpdir) / "test.txt"
+            get(cid="QmTEST", dest=dest, config=sample_config, profile="hrdag")
+
+            # Should use chll (backup) since nas doesn't have it
+            mock_requests.head.assert_called_once_with("http://chll:8080/ipfs/QmTEST", allow_redirects=True)
+            mock_requests.get.assert_called_once_with("http://chll:8080/ipfs/QmTEST", stream=True)
