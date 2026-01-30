@@ -82,6 +82,7 @@ class AddResult:
     cluster_host: str                       # Node we talked to
     returncode: int                         # 0=success, 1=partial, 2=failed, 3=config error
     error: Optional[str] = None             # Error message if returncode != 0
+    replica_count: Optional[int] = None     # Actual number of peers with successful pin
 
     @property
     def ok(self) -> bool:
@@ -104,6 +105,7 @@ class AddResult:
             "cluster_host": self.cluster_host,
             "returncode": self.returncode,
             "error": self.error,
+            "replica_count": self.replica_count,
         }
 
     def to_json(self, indent: int = 2) -> str:
@@ -128,6 +130,7 @@ class AddResult:
             cluster_host=data["cluster_host"],
             returncode=data.get("returncode", RC_SUCCESS if data.get("complete", True) else RC_FAILED),
             error=data.get("error"),
+            replica_count=data.get("replica_count"),
         )
 
     @classmethod

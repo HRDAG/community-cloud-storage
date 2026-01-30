@@ -24,6 +24,7 @@ from community_cloud_storage.types import (
     PeerInfo,
     PinStatus,
     RC_SUCCESS,
+    RC_PARTIAL,
     RC_FAILED,
     RC_CONFIG_ERROR,
 )
@@ -130,6 +131,7 @@ def add(
             cluster_host=target_host or "",
             returncode=RC_FAILED,
             error=f"Path not found: {path}",
+            replica_count=None,
         )
 
     # Determine allocations - config errors
@@ -146,6 +148,7 @@ def add(
             cluster_host=target_host or "",
             returncode=RC_CONFIG_ERROR,
             error=str(e),
+            replica_count=None,
         )
 
     # Get client - config errors
@@ -162,6 +165,7 @@ def add(
             cluster_host=target_host or "",
             returncode=RC_CONFIG_ERROR,
             error=str(e),
+            replica_count=None,
         )
 
     # Add to cluster with allocations
@@ -183,6 +187,7 @@ def add(
             cluster_host=target_host,
             returncode=RC_FAILED,
             error=str(e),
+            replica_count=None,
         )
     except Exception as e:
         # Catch any unexpected errors
@@ -196,6 +201,7 @@ def add(
             cluster_host=target_host,
             returncode=RC_FAILED,
             error=f"Unexpected error: {e}",
+            replica_count=None,
         )
 
     # Validate entries_raw is not empty (safety net)
@@ -211,6 +217,7 @@ def add(
             cluster_host=target_host,
             returncode=RC_FAILED,
             error="No entries returned from cluster (possible server error)",
+            replica_count=None,
         )
 
     # Root is the last entry from IPFS
@@ -227,6 +234,38 @@ def add(
             is_root=(cid == root_cid),
         ))
 
+    # Query pin status to verify replication
+    # Required allocations [primary, backup] were satisfied (or we would have failed above)
+    # Now check if we achieved minimum desired replication (3) and maximum (4)
+    try:
+        pin_status = status(root_cid, config, target_host)
+        pinned_peers = [
+            peer_id for peer_id, peer_status in pin_status.peer_map.items()
+            if peer_status.status == "pinned"
+        ]
+        replica_count = len(pinned_peers)
+
+        # Determine return code based on replica count
+        # Required: primary + backup (2) - already satisfied
+        # Desired minimum: 3 replicas
+        # Desired maximum: 4 replicas (replication_max)
+        if replica_count < 3:
+            returncode = RC_PARTIAL
+            error = f"Warning: Only {replica_count}/4 replicas pinned (primary+backup satisfied, but expected ≥3)"
+        elif replica_count < 4:
+            returncode = RC_SUCCESS
+            error = f"Info: {replica_count}/4 replicas pinned (expected 4)"
+        else:  # replica_count >= 4
+            returncode = RC_SUCCESS
+            error = None
+
+    except ClusterAPIError as e:
+        # Pin status check failed - content was added but we can't verify replication
+        # Return success with warning
+        replica_count = None
+        returncode = RC_SUCCESS
+        error = f"Warning: Content added but could not verify replication: {e}"
+
     return AddResult(
         root_cid=root_cid,
         root_path=str(path),
@@ -235,8 +274,9 @@ def add(
         profile=profile,
         added_at=datetime.now(timezone.utc),
         cluster_host=target_host,
-        returncode=RC_SUCCESS,
-        error=None,
+        returncode=returncode,
+        error=error,
+        replica_count=replica_count,
     )
 
 

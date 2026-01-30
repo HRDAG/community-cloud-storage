@@ -82,6 +82,20 @@ class TestAdd:
         mock_client.add.return_value = [
             {"name": "test.txt", "cid": "QmTEST", "size": 42},
         ]
+        # Mock pin_status to return 4 replicas (success case)
+        mock_client.pin_status.return_value = {
+            "cid": "QmTEST",
+            "name": "test",
+            "allocations": ["12D3KooWNAS", "12D3KooWCHLL"],
+            "peer_map": {
+                "12D3KooWNAS": {"peername": "nas", "status": "pinned", "error": ""},
+                "12D3KooWCHLL": {"peername": "chll", "status": "pinned", "error": ""},
+                "12D3KooWPeer3": {"peername": "peer3", "status": "pinned", "error": ""},
+                "12D3KooWPeer4": {"peername": "peer4", "status": "pinned", "error": ""},
+            },
+            "replication_factor_min": 2,
+            "replication_factor_max": 4,
+        }
 
         # Create temp file
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
@@ -96,6 +110,8 @@ class TestAdd:
             assert result.profile == "hrdag"
             assert len(result.entries) == 1
             assert result.allocations == ["12D3KooWNAS", "12D3KooWCHLL"]
+            assert result.replica_count == 4
+            assert result.error is None
 
             # Verify client was called with allocations
             mock_client.add.assert_called_once()
@@ -113,6 +129,20 @@ class TestAdd:
             {"name": "dir/file2.txt", "cid": "Qm2", "size": 20},
             {"name": "dir", "cid": "QmDIR", "size": 0},
         ]
+        # Mock pin_status to return 4 replicas
+        mock_client.pin_status.return_value = {
+            "cid": "QmDIR",
+            "name": "dir",
+            "allocations": ["12D3KooWNAS", "12D3KooWCHLL"],
+            "peer_map": {
+                "12D3KooWNAS": {"peername": "nas", "status": "pinned", "error": ""},
+                "12D3KooWCHLL": {"peername": "chll", "status": "pinned", "error": ""},
+                "12D3KooWPeer3": {"peername": "peer3", "status": "pinned", "error": ""},
+                "12D3KooWPeer4": {"peername": "peer4", "status": "pinned", "error": ""},
+            },
+            "replication_factor_min": 2,
+            "replication_factor_max": 4,
+        }
 
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir)
@@ -125,6 +155,7 @@ class TestAdd:
             assert result.root_cid == "QmDIR"
             assert len(result.entries) == 3
             assert result.total_size() == 30
+            assert result.replica_count == 4
 
     def test_add_nonexistent_path_returns_error(self, sample_config):
         result = add(Path("/nonexistent/path"), profile="hrdag", config=sample_config)
