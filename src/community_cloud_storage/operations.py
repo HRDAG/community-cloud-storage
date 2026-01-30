@@ -235,35 +235,89 @@ def add(
         ))
 
     # Query pin status to verify replication
-    # Required allocations [primary, backup] were satisfied (or we would have failed above)
-    # Now check if we achieved minimum desired replication (3) and maximum (4)
+    # Required allocations [primary, backup] were satisfied by cluster allocator
+    # Now verify they actually pinned and check total replication
     try:
         pin_status = status(root_cid, config, target_host)
-        pinned_peers = [
-            peer_id for peer_id, peer_status in pin_status.peer_map.items()
-            if peer_status.status == "pinned"
-        ]
-        replica_count = len(pinned_peers)
 
-        # Determine return code based on replica count
-        # Required: primary + backup (2) - already satisfied
-        # Desired minimum: 3 replicas
-        # Desired maximum: 4 replicas (replication_max)
-        if replica_count < 3:
+        # Check primary and backup status specifically
+        primary_peer_id = allocations[0]  # First allocation is primary
+        backup_peer_id = allocations[1]   # Second allocation is backup
+
+        primary_status = pin_status.peer_map.get(primary_peer_id)
+        backup_status = pin_status.peer_map.get(backup_peer_id)
+
+        # Check for errors on primary or backup
+        if primary_status and primary_status.status in ("error", "pin_error"):
+            return AddResult(
+                root_cid=root_cid,
+                root_path=str(path),
+                entries=entries,
+                allocations=allocations,
+                profile=profile,
+                added_at=datetime.now(timezone.utc),
+                cluster_host=target_host,
+                returncode=RC_FAILED,
+                error=f"Primary node pin failed: {primary_status.error or 'unknown error'}",
+                replica_count=0,
+            )
+
+        if backup_status and backup_status.status in ("error", "pin_error"):
+            return AddResult(
+                root_cid=root_cid,
+                root_path=str(path),
+                entries=entries,
+                allocations=allocations,
+                profile=profile,
+                added_at=datetime.now(timezone.utc),
+                cluster_host=target_host,
+                returncode=RC_FAILED,
+                error=f"Backup node pin failed: {backup_status.error or 'unknown error'}",
+                replica_count=0,
+            )
+
+        # Check if primary or backup still pending
+        primary_pinned = primary_status and primary_status.status == "pinned"
+        backup_pinned = backup_status and backup_status.status == "pinned"
+
+        if not primary_pinned or not backup_pinned:
+            # Primary or backup still pending (pinning, pin_queued, etc)
+            pending = []
+            if not primary_pinned:
+                pending.append(f"primary ({primary_status.status if primary_status else 'unknown'})")
+            if not backup_pinned:
+                pending.append(f"backup ({backup_status.status if backup_status else 'unknown'})")
+
             returncode = RC_PARTIAL
-            error = f"Warning: Only {replica_count}/4 replicas pinned (primary+backup satisfied, but expected ≥3)"
-        elif replica_count < 4:
-            returncode = RC_SUCCESS
-            error = f"Info: {replica_count}/4 replicas pinned (expected 4)"
-        else:  # replica_count >= 4
-            returncode = RC_SUCCESS
-            error = None
+            error = f"Pending: {', '.join(pending)} not yet pinned"
+            replica_count = None  # Don't count until primary+backup complete
+        else:
+            # Both primary and backup pinned - count total replicas
+            pinned_peers = [
+                peer_id for peer_id, peer_status in pin_status.peer_map.items()
+                if peer_status.status == "pinned"
+            ]
+            replica_count = len(pinned_peers)
+
+            # Determine return code based on replica count
+            # Required: primary + backup (2) - both pinned ✓
+            # Desired minimum: 3 replicas
+            # Desired maximum: 4 replicas (replication_max)
+            if replica_count < 3:
+                returncode = RC_PARTIAL
+                error = f"Warning: Only {replica_count}/4 replicas pinned (primary+backup satisfied, but expected ≥3)"
+            elif replica_count < 4:
+                returncode = RC_SUCCESS
+                error = f"Info: {replica_count}/4 replicas pinned (expected 4)"
+            else:  # replica_count >= 4
+                returncode = RC_SUCCESS
+                error = None
 
     except ClusterAPIError as e:
         # Pin status check failed - content was added but we can't verify replication
-        # Return success with warning
+        # Return partial with warning
         replica_count = None
-        returncode = RC_SUCCESS
+        returncode = RC_PARTIAL
         error = f"Warning: Content added but could not verify replication: {e}"
 
     return AddResult(
