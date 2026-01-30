@@ -190,13 +190,26 @@ class ClusterClient:
     def _build_add_params(
         self, name: str, allocations: list[str] = None, local: bool = True
     ) -> str:
-        """Build query string for /add endpoint."""
-        params = [f"name={name}"]
+        """Build query string for /add endpoint.
+
+        Uses buffered mode (stream-channels=false) for reliable error handling.
+        Errors are returned as proper HTTP status codes with JSON body instead
+        of being hidden in HTTP trailer headers.
+        """
+        from urllib.parse import urlencode
+
+        params = {
+            "name": name,
+            "stream-channels": "false",  # Enable buffered mode for reliable errors
+        }
+
         if allocations:
-            params.append(f"allocations={','.join(allocations)}")
+            params["allocations"] = ",".join(allocations)
+
         if local:
-            params.append("local=true")
-        return "&".join(params)
+            params["local"] = "true"
+
+        return urlencode(params)
 
     def _add_file(
         self, path: Path, name: str, allocations: list[str] = None, local: bool = True

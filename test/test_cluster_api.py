@@ -26,13 +26,16 @@ class TestBuildAddParams:
         """Basic name parameter with local=true (default)."""
         client = ClusterClient("localhost")
         result = client._build_add_params("test")
-        assert result == "name=test&local=true"
+        assert "name=test" in result
+        assert "stream-channels=false" in result
+        assert "local=true" in result
 
     def test_name_only_without_local(self):
         """Basic name parameter with local=false."""
         client = ClusterClient("localhost")
         result = client._build_add_params("test", local=False)
-        assert result == "name=test"
+        assert "name=test" in result
+        assert "stream-channels=false" in result
         assert "local" not in result
 
     def test_with_allocations(self):
@@ -40,14 +43,18 @@ class TestBuildAddParams:
         client = ClusterClient("localhost")
         result = client._build_add_params("test", ["peer1", "peer2"])
         assert "name=test" in result
-        assert "allocations=peer1,peer2" in result
+        # Note: comma is URL encoded as %2C
+        assert "allocations=peer1%2Cpeer2" in result or "allocations=peer1,peer2" in result
         assert "local=true" in result
+        assert "stream-channels=false" in result
 
     def test_with_allocations_no_local(self):
         """Allocations without local flag."""
         client = ClusterClient("localhost")
         result = client._build_add_params("test", ["peer1", "peer2"], local=False)
-        assert result == "name=test&allocations=peer1,peer2"
+        assert "name=test" in result
+        assert "allocations=peer1%2Cpeer2" in result or "allocations=peer1,peer2" in result
+        assert "stream-channels=false" in result
         assert "local" not in result
 
     def test_single_allocation(self):
@@ -63,38 +70,43 @@ class TestBuildAddParams:
         client = ClusterClient("localhost")
         result = client._build_add_params("test", [], local=False)
         assert "allocations" not in result
-        assert result == "name=test"
+        assert "name=test" in result
+        assert "stream-channels=false" in result
 
     def test_none_allocations_not_included(self):
         """None allocations should not add allocations param."""
         client = ClusterClient("localhost")
         result = client._build_add_params("test", None, local=False)
         assert "allocations" not in result
-        assert result == "name=test"
+        assert "name=test" in result
+        assert "stream-channels=false" in result
 
-    def test_name_with_spaces_not_encoded(self):
+    def test_name_with_spaces_properly_encoded(self):
         """
-        BUG CHECK: Names with spaces are NOT URL-encoded.
+        FIXED: Names with spaces ARE now properly URL-encoded.
 
-        This test documents current (possibly buggy) behavior.
-        If the cluster requires URL encoding, this would break requests.
+        Spaces are encoded as + or %20 by urllib.parse.urlencode.
         """
         client = ClusterClient("localhost")
         result = client._build_add_params("my file.txt", ["peer1"], local=False)
-        # Current behavior: space is NOT encoded
-        assert "my file.txt" in result
-        # If properly encoded, would be:
-        # assert "my%20file.txt" in result or "my+file.txt" in result
+        # Properly encoded: space becomes + or %20
+        assert "my+file.txt" in result or "my%20file.txt" in result
+        # Raw space should NOT appear
+        assert "my file.txt" not in result
 
-    def test_name_with_special_chars_not_encoded(self):
+    def test_name_with_special_chars_properly_encoded(self):
         """
-        BUG CHECK: Names with special characters are NOT URL-encoded.
+        FIXED: Names with special characters ARE now properly URL-encoded.
+
+        & becomes %26, = becomes %3D, etc.
         """
         client = ClusterClient("localhost")
         result = client._build_add_params("file&name=bad", ["peer1"], local=False)
-        # This would break the query string parsing!
-        # Current behavior: & is NOT encoded
-        assert "file&name=bad" in result
+        # Properly encoded: & becomes %26, = becomes %3D
+        assert "%26" in result  # & encoded
+        assert "%3D" in result  # = encoded
+        # Raw special chars should NOT appear
+        assert "file&name=bad" not in result
 
     def test_realistic_peer_ids(self):
         """Test with realistic IPFS Cluster peer IDs."""
@@ -102,7 +114,11 @@ class TestBuildAddParams:
         peer1 = "12D3KooWRwzo72ZsiP5Hnfn2kGoi9f2u8AcQBozEP8MPVhpSqeLQ"
         peer2 = "12D3KooWMJJ4ZVwHxNWVfxvKHyiF1XbEYW5Cq7gPPKyRQjbywABj"
         result = client._build_add_params("test", [peer1, peer2], local=False)
-        assert f"allocations={peer1},{peer2}" in result
+        # Peer IDs should be present
+        assert peer1 in result
+        assert peer2 in result
+        # Note: comma may be URL encoded as %2C
+        assert "allocations=" in result
 
 
 class TestAddRequestFormat:
