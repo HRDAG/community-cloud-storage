@@ -150,8 +150,10 @@ class TestAddRequestFormat:
             assert method == "POST"
             assert endpoint.startswith("/add?")
             assert "name=test.txt" in endpoint
-            assert "allocations=peer1,peer2" in endpoint
+            # Note: comma is URL encoded as %2C
+            assert "allocations=peer1%2Cpeer2" in endpoint or "allocations=peer1,peer2" in endpoint
             assert "local=true" in endpoint
+            assert "stream-channels=false" in endpoint
         finally:
             path.unlink()
 
@@ -177,7 +179,9 @@ class TestAddRequestFormat:
             endpoint = call_args[0][1]
 
             assert "local" not in endpoint
-            assert "allocations=peer1,peer2" in endpoint
+            # Note: comma is URL encoded as %2C
+            assert "allocations=peer1%2Cpeer2" in endpoint or "allocations=peer1,peer2" in endpoint
+            assert "stream-channels=false" in endpoint
         finally:
             path.unlink()
 
@@ -204,7 +208,8 @@ class TestAddRequestFormat:
 
             assert "allocations" not in endpoint
             assert "local" not in endpoint
-            assert endpoint == "/add?name=test.txt"
+            assert "name=test.txt" in endpoint
+            assert "stream-channels=false" in endpoint
         finally:
             path.unlink()
 

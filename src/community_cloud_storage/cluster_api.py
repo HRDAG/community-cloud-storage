@@ -214,7 +214,11 @@ class ClusterClient:
     def _add_file(
         self, path: Path, name: str, allocations: list[str] = None, local: bool = True
     ) -> list:
-        """Add a single file."""
+        """Add a single file.
+
+        Uses buffered mode (stream-channels=false) which returns JSON array
+        instead of NDJSON streaming format.
+        """
         query = self._build_add_params(name, allocations, local)
         logger.debug(f"_add_file: query string = {query}")
 
@@ -222,13 +226,43 @@ class ClusterClient:
             files = {"file": (path.name, f)}
             response = self._request("POST", f"/add?{query}", files=files)
 
-        # Response is newline-delimited JSON
-        results = []
-        for line in response.text.strip().split("\n"):
-            if line:
-                entry = json.loads(line)
-                results.append(entry)
-                logger.debug(f"_add_file: parsed entry = {entry}")
+        # Parse response (buffered mode returns JSON array or single object)
+        body = response.text.strip()
+        if not body:
+            raise ClusterAPIError("Empty response body - server error occurred")
+
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError as e:
+            raise ClusterAPIError(f"Invalid JSON response: {body[:200]}") from e
+
+        # Handle both array and single object responses
+        if isinstance(data, dict):
+            results = [data]
+        elif isinstance(data, list):
+            results = data
+        else:
+            raise ClusterAPIError(f"Unexpected response type: {type(data)}")
+
+        # Check for inline errors and validate
+        for entry in results:
+            # Check for error type field
+            if entry.get("Type") == "error":
+                raise ClusterAPIError(
+                    entry.get("Message", "Unknown cluster error"),
+                    entry.get("Code", 0)
+                )
+            # Check for error without explicit Type (some formats)
+            if "Message" in entry and "cid" not in entry and "Hash" not in entry:
+                raise ClusterAPIError(
+                    entry.get("Message", "Unknown cluster error"),
+                    entry.get("Code", 0)
+                )
+            logger.debug(f"_add_file: parsed entry = {entry}")
+
+        # Validate non-empty results
+        if len(results) == 0:
+            raise ClusterAPIError("No entries returned from cluster")
 
         logger.debug(f"_add_file: total entries = {len(results)}")
         return results
@@ -294,13 +328,43 @@ class ClusterClient:
             for fh in file_handles:
                 fh.close()
 
-        # Parse newline-delimited JSON response
-        results = []
-        for line in response.text.strip().split("\n"):
-            if line:
-                entry = json.loads(line)
-                results.append(entry)
-                logger.debug(f"_add_directory: parsed entry = {entry}")
+        # Parse response (buffered mode returns JSON array or single object)
+        body = response.text.strip()
+        if not body:
+            raise ClusterAPIError("Empty response body - server error occurred")
+
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError as e:
+            raise ClusterAPIError(f"Invalid JSON response: {body[:200]}") from e
+
+        # Handle both array and single object responses
+        if isinstance(data, dict):
+            results = [data]
+        elif isinstance(data, list):
+            results = data
+        else:
+            raise ClusterAPIError(f"Unexpected response type: {type(data)}")
+
+        # Check for inline errors and validate
+        for entry in results:
+            # Check for error type field
+            if entry.get("Type") == "error":
+                raise ClusterAPIError(
+                    entry.get("Message", "Unknown cluster error"),
+                    entry.get("Code", 0)
+                )
+            # Check for error without explicit Type (some formats)
+            if "Message" in entry and "cid" not in entry and "Hash" not in entry:
+                raise ClusterAPIError(
+                    entry.get("Message", "Unknown cluster error"),
+                    entry.get("Code", 0)
+                )
+            logger.debug(f"_add_directory: parsed entry = {entry}")
+
+        # Validate non-empty results
+        if len(results) == 0:
+            raise ClusterAPIError("No entries returned from cluster")
 
         logger.debug(f"_add_directory: total entries = {len(results)}")
         return results
@@ -368,13 +432,43 @@ class ClusterClient:
             if "unauthorized" in result.stdout.lower():
                 raise ClusterAPIError("Unauthorized: check basic auth credentials", 401)
 
-            # Parse NDJSON response
-            results = []
-            for line in result.stdout.strip().split("\n"):
-                if line:
-                    entry = json.loads(line)
-                    results.append(entry)
-                    logger.debug(f"_add_directory_curl: parsed entry = {entry}")
+            # Parse response (buffered mode returns JSON array)
+            body = result.stdout.strip()
+            if not body:
+                raise ClusterAPIError("Empty response from curl - server error occurred")
+
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError as e:
+                raise ClusterAPIError(f"Invalid JSON response: {body[:200]}") from e
+
+            # Handle both array and single object responses
+            if isinstance(data, dict):
+                results = [data]
+            elif isinstance(data, list):
+                results = data
+            else:
+                raise ClusterAPIError(f"Unexpected response type: {type(data)}")
+
+            # Check for inline errors and validate
+            for entry in results:
+                # Check for error type field
+                if entry.get("Type") == "error":
+                    raise ClusterAPIError(
+                        entry.get("Message", "Unknown cluster error"),
+                        entry.get("Code", 0)
+                    )
+                # Check for error without explicit Type (some formats)
+                if "Message" in entry and "cid" not in entry and "Hash" not in entry:
+                    raise ClusterAPIError(
+                        entry.get("Message", "Unknown cluster error"),
+                        entry.get("Code", 0)
+                    )
+                logger.debug(f"_add_directory_curl: parsed entry = {entry}")
+
+            # Validate non-empty results
+            if len(results) == 0:
+                raise ClusterAPIError("No entries returned from cluster")
 
             logger.debug(f"_add_directory_curl: total entries = {len(results)}")
             return results
