@@ -23,6 +23,7 @@ from community_cloud_storage.config import CCSConfig
 from community_cloud_storage.types import (
     AddResult,
     CIDEntry,
+    EnsurePinsResult,
     PeerInfo,
     PinStatus,
     RC_SUCCESS,
@@ -516,3 +517,88 @@ def get(
     with open(dest, "wb") as f:
         for chunk in response.iter_content(chunk_size=8192):
             f.write(chunk)
+
+
+def ensure_pins(
+    profile: str,
+    config: CCSConfig,
+    host: str = None,
+    dry_run: bool = False,
+    progress_callback=None,
+) -> EnsurePinsResult:
+    """
+    Ensure all pins include required allocations for a profile.
+
+    Scans all cluster pins and re-pins any that are missing the profile's
+    required peers (primary + backup).
+
+    WARNING: Re-pinning REPLACES allocations. Cluster v1.1.5 reduces to
+    replication_factor_min (2) allocations. Pins currently with 3 replicas
+    will be reduced to 2 [primary, backup]. The cluster allocator may add
+    a 3rd replica later.
+
+    Args:
+        profile: Profile name (e.g., "hrdag")
+        config: CCSConfig with auth, profiles, and nodes
+        host: Override which cluster node to talk to
+        dry_run: If True, report what would change without modifying
+        progress_callback: Optional callable(current, total, pin_name, action)
+
+    Returns:
+        EnsurePinsResult with counts and error details
+    """
+    import time
+
+    allocations = _get_allocations(profile, config)
+    required_set = set(allocations)
+
+    client = _get_client(config, host)
+    all_pins = client.pins()
+
+    total = len(all_pins)
+    already_correct = 0
+    fixed = 0
+    errors = 0
+    error_details = []
+
+    for i, pin_data in enumerate(all_pins):
+        pin = PinStatus.from_cluster_status(pin_data)
+        name = pin.name or ""
+
+        if progress_callback:
+            progress_callback(i + 1, total, name, "checking")
+
+        current_allocs = set(pin.allocations)
+        if required_set.issubset(current_allocs):
+            already_correct += 1
+            continue
+
+        if dry_run:
+            fixed += 1
+            if progress_callback:
+                progress_callback(i + 1, total, name, "would fix")
+            continue
+
+        try:
+            client.pin(pin.cid, name=name, allocations=allocations)
+            fixed += 1
+            if progress_callback:
+                progress_callback(i + 1, total, name, "fixed")
+            time.sleep(0.05)
+        except (ClusterAPIError, Exception) as e:
+            errors += 1
+            error_details.append({
+                "cid": pin.cid,
+                "name": name,
+                "error": str(e),
+            })
+
+    return EnsurePinsResult(
+        total=total,
+        already_correct=already_correct,
+        fixed=fixed,
+        errors=errors,
+        dry_run=dry_run,
+        required_peers=allocations,
+        error_details=error_details,
+    )

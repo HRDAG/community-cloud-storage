@@ -206,6 +206,96 @@ def ls(config_file: Path, host: str) -> None:
     click.echo(json.dumps(output, indent=2))
 
 
+@cli.command("ensure-pins")
+@click.option(
+    "--profile",
+    required=True,
+    help="Organization profile (e.g., hrdag). Determines required allocations.",
+)
+@click.option(
+    "--config-file",
+    type=click.Path(exists=True, path_type=Path),
+    help="Config file path (default: ~/.ccs/config.yml)",
+)
+@click.option(
+    "--host",
+    callback=validate_peername,
+    help="Override cluster host to talk to (default: from config)",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show what would change without modifying pins",
+)
+@handle_api_error
+def ensure_pins(profile: str, config_file: Path, host: str, dry_run: bool) -> None:
+    """
+    Ensure all pins include required allocations for a profile.
+
+    Scans all cluster pins and re-pins any that are missing the profile's
+    required peers (primary + backup node).
+
+    WARNING: Re-pinning REPLACES allocations. Cluster v1.1.5 reduces to
+    replication_factor_min (2) allocations. Pins with 3 replicas may be
+    temporarily reduced to 2 until the cluster allocator adds a 3rd.
+
+    Examples:
+
+        ccs ensure-pins --profile hrdag --dry-run
+
+        ccs ensure-pins --profile hrdag
+    """
+    config = config_module.load_config(config_file)
+
+    try:
+        allocs = operations._get_allocations(profile, config)
+    except operations.AllocationError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    # Look up peer names for display
+    peer_names = []
+    for peer_id in allocs:
+        name = peer_id[:16] + "..."
+        for node_name, node in config.nodes.items():
+            if node.peer_id == peer_id:
+                name = node_name
+                break
+        peer_names.append(name)
+
+    mode = "DRY RUN" if dry_run else "LIVE"
+    click.echo(f"ensure-pins [{mode}] profile={profile}")
+    click.echo(f"  required peers: {', '.join(peer_names)}")
+    click.echo()
+
+    def progress(current, total, pin_name, action):
+        if action in ("fixed", "would fix"):
+            click.echo(f"  [{current}/{total}] {pin_name}  {action}")
+        elif current == total or current % 500 == 0:
+            click.echo(f"  [{current}/{total}] scanned...")
+
+    result = operations.ensure_pins(
+        profile=profile,
+        config=config,
+        host=host,
+        dry_run=dry_run,
+        progress_callback=progress,
+    )
+
+    click.echo()
+    click.echo(f"Results:")
+    click.echo(f"  total pins:       {result.total}")
+    click.echo(f"  already correct:  {result.already_correct}")
+    verb = "would fix" if dry_run else "fixed"
+    click.echo(f"  {verb}:          {result.fixed}")
+    if result.errors:
+        click.echo(f"  errors:           {result.errors}")
+        for detail in result.error_details[:5]:
+            click.echo(f"    {detail['name']}: {detail['error'][:80]}")
+        if len(result.error_details) > 5:
+            click.echo(f"    ... and {len(result.error_details) - 5} more")
+
+
 @cli.command()
 @click.option(
     "--config-file",

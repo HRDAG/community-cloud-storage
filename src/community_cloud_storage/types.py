@@ -309,3 +309,29 @@ class PinStatus:
     def pinned_peers(self) -> list[str]:
         """List of peernames that have pinned this CID."""
         return [s.peername for s in self.peer_map.values() if s.status == "pinned"]
+
+
+@dataclass
+class EnsurePinsResult:
+    """Result of ensure-pins operation."""
+    total: int                              # Total pins checked
+    already_correct: int                    # Pins already having required allocations
+    fixed: int                              # Pins re-pinned with correct allocations
+    errors: int                             # Pins that failed to re-pin
+    dry_run: bool                           # Whether this was a dry run
+    required_peers: list[str]               # Peer IDs that were required
+    error_details: list[dict] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "total": self.total,
+            "already_correct": self.already_correct,
+            "fixed": self.fixed,
+            "errors": self.errors,
+            "dry_run": self.dry_run,
+            "required_peers": self.required_peers,
+            "error_details": self.error_details,
+        }
+
+    def to_json(self, indent: int = 2) -> str:
+        return json.dumps(self.to_dict(), indent=indent)

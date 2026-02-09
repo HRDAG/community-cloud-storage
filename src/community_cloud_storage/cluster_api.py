@@ -136,6 +136,38 @@ class ClusterClient:
         response = self._request("GET", f"/pins/{cid}")
         return response.json()
 
+    def pin(self, cid: str, name: str = None, allocations: list[str] = None) -> dict:
+        """
+        Pin or re-pin a CID with updated allocations.
+
+        WARNING: This REPLACES existing allocations. Cluster v1.1.5 reduces
+        to replication_factor_min allocations regardless of how many peers
+        are requested.
+
+        Args:
+            cid: The CID to pin
+            name: Pin name (pass existing name to preserve it)
+            allocations: List of peer IDs for explicit allocation
+
+        Returns:
+            Pin status dict from cluster response
+        """
+        from urllib.parse import urlencode
+
+        params = {}
+        if name:
+            params["name"] = name
+        if allocations:
+            params["allocations"] = ",".join(allocations)
+
+        query = urlencode(params) if params else ""
+        endpoint = f"/pins/{cid}"
+        if query:
+            endpoint += f"?{query}"
+
+        response = self._request("POST", endpoint)
+        return response.json()
+
     def unpin(self, cid: str) -> dict:
         """
         Remove a pin from the cluster.
