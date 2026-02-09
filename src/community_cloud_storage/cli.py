@@ -200,6 +200,73 @@ def peers(ctx, host: str) -> None:
     callback=validate_peername,
     help="Override cluster host to talk to (default: from config)",
 )
+@click.option("--json", "output_json_flag", is_flag=True, help="Output JSON")
+@click.option(
+    "--output",
+    type=click.Path(path_type=Path),
+    help="Write JSON to file (implies JSON format)",
+)
+@click.pass_context
+@handle_api_error
+def health(ctx, host: str, output_json_flag: bool, output: Path) -> None:
+    """
+    Show cluster health summary.
+
+    Checks peer status and pin health across all nodes. Returns exit code
+    0 (ok), 1 (degraded), or 2 (error) for use in monitoring/cron.
+
+    Examples:
+
+        ccs health
+
+        ccs health --json
+
+        ccs health --output /tmp/health.json
+    """
+    config = _load_config(ctx)
+    report = operations.health(config=config, host=host)
+
+    if output:
+        with open(output, "w") as f:
+            f.write(report.to_json())
+        click.echo(f"Health report written to: {output}")
+        sys.exit(report.exit_code)
+
+    if output_json_flag:
+        click.echo(report.to_json())
+        sys.exit(report.exit_code)
+
+    # Human-readable output
+    click.echo(f"cluster health: {report.status}")
+    click.echo(f"peers: {report.peers_online}/{report.peers_total} online")
+    click.echo(f"pins: {report.pins_total} total")
+    click.echo()
+
+    # Node table
+    click.echo(f"  {'node':<14}{'pinned':>8}{'remote':>8}{'errors':>8}  status")
+    for node in report.nodes:
+        click.echo(
+            f"  {node.name:<14}{node.pinned:>8}{node.remote:>8}{node.pin_errors:>8}  {node.status}"
+        )
+
+    # Pin errors
+    if report.pin_errors:
+        click.echo()
+        click.echo(f"pin errors ({len(report.pin_errors)}):")
+        for err in report.pin_errors[:20]:
+            click.echo(f"  {err['cid']} on {err['node']}: {err['error']}")
+        if len(report.pin_errors) > 20:
+            click.echo(f"  ... and {len(report.pin_errors) - 20} more")
+
+    sys.exit(report.exit_code)
+
+
+@cli.command()
+@click.option(
+    "--host",
+    callback=validate_peername,
+    help="Override cluster host to talk to (default: from config)",
+)
 @click.pass_context
 @handle_api_error
 def ls(ctx, host: str) -> None:

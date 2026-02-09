@@ -335,3 +335,84 @@ class EnsurePinsResult:
 
     def to_json(self, indent: int = 2) -> str:
         return json.dumps(self.to_dict(), indent=indent)
+
+
+# Return codes for HealthReport
+HC_OK = 0               # All peers up, no pin errors
+HC_DEGRADED = 1         # Some pin errors but cluster functional
+HC_ERROR = 2            # Peers offline or API unreachable
+
+
+@dataclass
+class NodeHealth:
+    """Health summary for a single cluster node."""
+    name: str
+    peer_id: str
+    online: bool
+    pinned: int = 0
+    remote: int = 0
+    pin_errors: int = 0
+    error: Optional[str] = None     # peer-level error from /peers
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "peer_id": self.peer_id,
+            "online": self.online,
+            "pinned": self.pinned,
+            "remote": self.remote,
+            "pin_errors": self.pin_errors,
+            "error": self.error,
+        }
+
+    @property
+    def status(self) -> str:
+        if not self.online:
+            return "error"
+        if self.pin_errors > 0:
+            return "degraded"
+        return "ok"
+
+
+@dataclass
+class HealthReport:
+    """Cluster health report."""
+    status: str                     # "ok", "degraded", "error"
+    checked_at: datetime
+    peers_total: int
+    peers_online: int
+    pins_total: int
+    nodes: list[NodeHealth]
+    pin_errors: list[dict]          # [{cid, node, error}, ...]
+
+    def to_dict(self) -> dict:
+        return {
+            "status": self.status,
+            "checked_at": self.checked_at.isoformat(),
+            "peers": {
+                "total": self.peers_total,
+                "online": self.peers_online,
+                "offline": self.peers_total - self.peers_online,
+                "list": [n.to_dict() for n in self.nodes],
+            },
+            "pins": {
+                "total": self.pins_total,
+                "by_node": {
+                    n.name: {"pinned": n.pinned, "remote": n.remote, "errors": n.pin_errors}
+                    for n in self.nodes
+                },
+                "errors": self.pin_errors,
+            },
+        }
+
+    def to_json(self, indent: int = 2) -> str:
+        return json.dumps(self.to_dict(), indent=indent)
+
+    @property
+    def exit_code(self) -> int:
+        """Return process exit code: 0=ok, 1=degraded, 2=error."""
+        if self.status == "ok":
+            return 0
+        if self.status == "degraded":
+            return 1
+        return 2

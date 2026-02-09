@@ -24,6 +24,8 @@ from community_cloud_storage.types import (
     AddResult,
     CIDEntry,
     EnsurePinsResult,
+    HealthReport,
+    NodeHealth,
     PeerInfo,
     PinStatus,
     RC_SUCCESS,
@@ -601,4 +603,86 @@ def ensure_pins(
         dry_run=dry_run,
         required_peers=allocations,
         error_details=error_details,
+    )
+
+
+def health(
+    config: CCSConfig,
+    host: str = None,
+) -> HealthReport:
+    """
+    Get cluster health summary.
+
+    Queries peers and all pin statuses, aggregates per-node health,
+    and determines overall cluster status.
+
+    Args:
+        config: CCSConfig with auth
+        host: Override which cluster node to talk to
+
+    Returns:
+        HealthReport with overall status, per-node stats, and pin errors
+
+    Raises:
+        ClusterAPIError: If cluster API is unreachable
+    """
+    # 1. Get peer list + online status
+    peer_list = peers(config, host)
+
+    # Build node map: peer_id -> NodeHealth
+    node_map = {}
+    for peer in peer_list:
+        node_map[peer.peer_id] = NodeHealth(
+            name=peer.name,
+            peer_id=peer.peer_id,
+            online=peer.error is None,
+            error=peer.error,
+        )
+
+    # 2. Get all pin statuses
+    client = _get_client(config, host)
+    raw_pins = client.pins()
+    all_pins = [PinStatus.from_cluster_status(p) for p in raw_pins]
+
+    # 3. Aggregate per-node counts from each pin's peer_map
+    pin_errors = []
+    for pin in all_pins:
+        for peer_id, peer_status in pin.peer_map.items():
+            node = node_map.get(peer_id)
+            if node is None:
+                # Peer in pin map but not in /peers (shouldn't happen normally)
+                continue
+
+            if peer_status.status == "pinned":
+                node.pinned += 1
+            elif peer_status.status == "remote":
+                node.remote += 1
+            elif peer_status.status in ("pin_error", "error"):
+                node.pin_errors += 1
+                pin_errors.append({
+                    "cid": pin.cid[:20] + "...",
+                    "node": node.name,
+                    "error": peer_status.error or "unknown error",
+                })
+
+    # 4. Determine overall status
+    nodes = list(node_map.values())
+    peers_online = sum(1 for n in nodes if n.online)
+    peers_total = len(nodes)
+
+    if peers_online < peers_total:
+        overall_status = "error"
+    elif pin_errors:
+        overall_status = "degraded"
+    else:
+        overall_status = "ok"
+
+    return HealthReport(
+        status=overall_status,
+        checked_at=datetime.now(timezone.utc),
+        peers_total=peers_total,
+        peers_online=peers_online,
+        pins_total=len(all_pins),
+        nodes=nodes,
+        pin_errors=pin_errors,
     )

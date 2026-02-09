@@ -21,6 +21,7 @@ from community_cloud_storage.config import (
 )
 from community_cloud_storage.operations import (
     add,
+    health,
     peers,
     status,
     _get_allocations,
@@ -426,3 +427,162 @@ class TestGet:
             # Should use chll (backup) since nas doesn't have it
             mock_requests.head.assert_called_once_with("http://chll:8080/ipfs/QmTEST", allow_redirects=True)
             mock_requests.get.assert_called_once_with("http://chll:8080/ipfs/QmTEST", stream=True)
+
+
+def _make_peers_ndjson(peer_list):
+    """Build NDJSON text from list of (name, peer_id, error) tuples."""
+    import json as _json
+    lines = []
+    for name, peer_id, error in peer_list:
+        obj = {"peername": name, "id": peer_id, "addresses": []}
+        if error:
+            obj["error"] = error
+        lines.append(_json.dumps(obj))
+    return "\n".join(lines)
+
+
+def _make_pin(cid, peer_statuses):
+    """Build a raw pin dict from cid and {peer_id: (peername, status, error)}."""
+    peer_map = {}
+    for peer_id, (peername, st, err) in peer_statuses.items():
+        peer_map[peer_id] = {"peername": peername, "status": st, "error": err or ""}
+    return {
+        "cid": cid,
+        "name": "",
+        "allocations": list(peer_statuses.keys()),
+        "peer_map": peer_map,
+        "replication_factor_min": 2,
+        "replication_factor_max": 4,
+    }
+
+
+class TestHealth:
+    """Tests for health() operation."""
+
+    @patch("community_cloud_storage.operations._get_client")
+    def test_health_all_ok(self, mock_get_client, sample_config):
+        """All peers up, all pins pinned -> status ok."""
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+
+        # Mock /peers
+        mock_response = MagicMock()
+        mock_response.text = _make_peers_ndjson([
+            ("nas", "12D3KooWNAS", None),
+            ("chll", "12D3KooWCHLL", None),
+            ("meerkat", "12D3KooWMEER", None),
+        ])
+        mock_client._request.return_value = mock_response
+
+        # Mock /pins - all pinned on nas+chll, remote on meerkat
+        mock_client.pins.return_value = [
+            _make_pin("QmAAA", {
+                "12D3KooWNAS": ("nas", "pinned", None),
+                "12D3KooWCHLL": ("chll", "pinned", None),
+                "12D3KooWMEER": ("meerkat", "remote", None),
+            }),
+            _make_pin("QmBBB", {
+                "12D3KooWNAS": ("nas", "pinned", None),
+                "12D3KooWCHLL": ("chll", "pinned", None),
+                "12D3KooWMEER": ("meerkat", "remote", None),
+            }),
+        ]
+
+        result = health(config=sample_config)
+
+        assert result.status == "ok"
+        assert result.exit_code == 0
+        assert result.peers_total == 3
+        assert result.peers_online == 3
+        assert result.pins_total == 2
+        assert result.pin_errors == []
+
+        # Check per-node counts
+        by_name = {n.name: n for n in result.nodes}
+        assert by_name["nas"].pinned == 2
+        assert by_name["nas"].remote == 0
+        assert by_name["meerkat"].remote == 2
+        assert by_name["meerkat"].pinned == 0
+
+    @patch("community_cloud_storage.operations._get_client")
+    def test_health_degraded(self, mock_get_client, sample_config):
+        """All peers up but pin errors -> status degraded."""
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+
+        mock_response = MagicMock()
+        mock_response.text = _make_peers_ndjson([
+            ("nas", "12D3KooWNAS", None),
+            ("chll", "12D3KooWCHLL", None),
+        ])
+        mock_client._request.return_value = mock_response
+
+        mock_client.pins.return_value = [
+            _make_pin("QmAAA", {
+                "12D3KooWNAS": ("nas", "pinned", None),
+                "12D3KooWCHLL": ("chll", "pin_error", "context canceled"),
+            }),
+        ]
+
+        result = health(config=sample_config)
+
+        assert result.status == "degraded"
+        assert result.exit_code == 1
+        assert result.peers_online == 2
+        assert len(result.pin_errors) == 1
+        assert result.pin_errors[0]["node"] == "chll"
+        assert "context canceled" in result.pin_errors[0]["error"]
+
+    @patch("community_cloud_storage.operations._get_client")
+    def test_health_error_peer_offline(self, mock_get_client, sample_config):
+        """Peer offline -> status error."""
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+
+        mock_response = MagicMock()
+        mock_response.text = _make_peers_ndjson([
+            ("nas", "12D3KooWNAS", None),
+            ("chll", "12D3KooWCHLL", "dial backoff"),
+        ])
+        mock_client._request.return_value = mock_response
+
+        mock_client.pins.return_value = []
+
+        result = health(config=sample_config)
+
+        assert result.status == "error"
+        assert result.exit_code == 2
+        assert result.peers_online == 1
+        assert result.peers_total == 2
+
+        by_name = {n.name: n for n in result.nodes}
+        assert by_name["chll"].online is False
+        assert by_name["chll"].status == "error"
+
+    @patch("community_cloud_storage.operations._get_client")
+    def test_health_json_output(self, mock_get_client, sample_config):
+        """to_dict/to_json produce valid structure."""
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+
+        mock_response = MagicMock()
+        mock_response.text = _make_peers_ndjson([
+            ("nas", "12D3KooWNAS", None),
+        ])
+        mock_client._request.return_value = mock_response
+        mock_client.pins.return_value = []
+
+        result = health(config=sample_config)
+        d = result.to_dict()
+
+        assert "status" in d
+        assert "checked_at" in d
+        assert d["peers"]["total"] == 1
+        assert d["peers"]["online"] == 1
+        assert d["peers"]["offline"] == 0
+        assert d["pins"]["total"] == 0
+
+        # Verify to_json is valid JSON
+        import json
+        parsed = json.loads(result.to_json())
+        assert parsed["status"] == "ok"
