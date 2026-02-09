@@ -180,6 +180,7 @@ def add(
             recursive=recursive,
             name=path.name,
             allocations=allocations,
+            metadata={"org": profile},
         )
     except ClusterAPIError as e:
         return AddResult(
@@ -686,3 +687,57 @@ def health(
         nodes=nodes,
         pin_errors=pin_errors,
     )
+
+
+def tag_pins(
+    profile: str,
+    config: CCSConfig,
+    host: str = None,
+    dry_run: bool = False,
+) -> dict:
+    """Tag all pins with org metadata for multi-org rebalancing.
+
+    One-time migration: reads all pins, sets metadata={"org": profile}
+    on each that doesn't already have it.
+
+    Args:
+        profile: Organization profile name (e.g., "hrdag")
+        config: CCSConfig with auth
+        host: Override which cluster node to talk to
+        dry_run: If True, report what would change without modifying
+
+    Returns:
+        Dict with counts: total, tagged, skipped, errors, dry_run
+    """
+    client = _get_client(config, host)
+    all_pins = client.pins()
+
+    tagged = 0
+    skipped = 0
+    errors = 0
+
+    for pin in all_pins:
+        existing_meta = pin.get("metadata") or {}
+        if existing_meta.get("org") == profile:
+            skipped += 1
+            continue
+
+        tagged += 1
+        if not dry_run:
+            try:
+                client.pin(
+                    pin["cid"],
+                    name=pin.get("name"),
+                    metadata={"org": profile},
+                )
+            except Exception:
+                errors += 1
+                tagged -= 1
+
+    return {
+        "total": len(all_pins),
+        "tagged": tagged,
+        "skipped": skipped,
+        "errors": errors,
+        "dry_run": dry_run,
+    }

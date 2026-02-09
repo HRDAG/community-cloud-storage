@@ -136,7 +136,8 @@ class ClusterClient:
         response = self._request("GET", f"/pins/{cid}")
         return response.json()
 
-    def pin(self, cid: str, name: str = None, allocations: list[str] = None) -> dict:
+    def pin(self, cid: str, name: str = None, allocations: list[str] = None,
+            metadata: dict = None) -> dict:
         """
         Pin or re-pin a CID with updated allocations.
 
@@ -148,6 +149,7 @@ class ClusterClient:
             cid: The CID to pin
             name: Pin name (pass existing name to preserve it)
             allocations: List of peer IDs for explicit allocation
+            metadata: Dict of key-value pairs for pin metadata (e.g. {"org": "hrdag"})
 
         Returns:
             Pin status dict from cluster response
@@ -159,6 +161,9 @@ class ClusterClient:
             params["name"] = name
         if allocations:
             params["allocations"] = ",".join(allocations)
+        if metadata:
+            for key, value in metadata.items():
+                params[f"meta-{key}"] = value
 
         query = urlencode(params) if params else ""
         endpoint = f"/pins/{cid}"
@@ -184,6 +189,7 @@ class ClusterClient:
         name: str = None,
         allocations: list[str] = None,
         local: bool = True,
+        metadata: dict = None,
     ) -> list:
         """
         Add a file or directory to the cluster.
@@ -207,20 +213,21 @@ class ClusterClient:
         logger.debug(f"add() called: path={path}, name={name}, allocations={allocations}, local={local}")
 
         if path.is_file():
-            return self._add_file(path, name, allocations, local)
+            return self._add_file(path, name, allocations, local, metadata)
         elif path.is_dir() and recursive:
             # Count files to decide which method to use
             file_count = sum(1 for f in path.rglob("*") if f.is_file())
             if file_count > CURL_THRESHOLD_FILES:
                 logger.info(f"Using curl for {file_count} files (threshold: {CURL_THRESHOLD_FILES})")
-                return self._add_directory_curl(path, name, allocations, local)
+                return self._add_directory_curl(path, name, allocations, local, metadata)
             else:
-                return self._add_directory(path, name, allocations, local)
+                return self._add_directory(path, name, allocations, local, metadata)
         else:
             raise ValueError(f"Path {path} is not a file or directory")
 
     def _build_add_params(
-        self, name: str, allocations: list[str] = None, local: bool = True
+        self, name: str, allocations: list[str] = None, local: bool = True,
+        metadata: dict = None,
     ) -> str:
         """Build query string for /add endpoint.
 
@@ -241,17 +248,22 @@ class ClusterClient:
         if local:
             params["local"] = "true"
 
+        if metadata:
+            for key, value in metadata.items():
+                params[f"meta-{key}"] = value
+
         return urlencode(params)
 
     def _add_file(
-        self, path: Path, name: str, allocations: list[str] = None, local: bool = True
+        self, path: Path, name: str, allocations: list[str] = None, local: bool = True,
+        metadata: dict = None,
     ) -> list:
         """Add a single file.
 
         Uses buffered mode (stream-channels=false) which returns JSON array
         instead of NDJSON streaming format.
         """
-        query = self._build_add_params(name, allocations, local)
+        query = self._build_add_params(name, allocations, local, metadata)
         logger.debug(f"_add_file: query string = {query}")
 
         with open(path, "rb") as f:
@@ -300,7 +312,8 @@ class ClusterClient:
         return results
 
     def _add_directory(
-        self, path: Path, name: str, allocations: list[str] = None, local: bool = True
+        self, path: Path, name: str, allocations: list[str] = None, local: bool = True,
+        metadata: dict = None,
     ) -> list:
         """Add a directory recursively using streaming multipart form.
 
@@ -319,7 +332,7 @@ class ClusterClient:
 
         logger.debug(f"_add_directory: found {len(files_to_add)} files")
 
-        query = self._build_add_params(name, allocations, local)
+        query = self._build_add_params(name, allocations, local, metadata)
         logger.debug(f"_add_directory: query string = {query}")
 
         # Build streaming multipart encoder
@@ -402,7 +415,8 @@ class ClusterClient:
         return results
 
     def _add_directory_curl(
-        self, path: Path, name: str, allocations: list[str] = None, local: bool = True
+        self, path: Path, name: str, allocations: list[str] = None, local: bool = True,
+        metadata: dict = None,
     ) -> list:
         """Add a directory using curl subprocess.
 
@@ -421,7 +435,7 @@ class ClusterClient:
         logger.debug(f"_add_directory_curl: found {len(files_to_add)} files")
 
         # Build query string
-        query = self._build_add_params(name, allocations, local)
+        query = self._build_add_params(name, allocations, local, metadata)
 
         # Build curl command
         url = f"{self.base_url}/add?{query}"

@@ -24,6 +24,7 @@ from community_cloud_storage.operations import (
     health,
     peers,
     status,
+    tag_pins,
     _get_allocations,
     AllocationError,
     ConfigError,
@@ -586,3 +587,184 @@ class TestHealth:
         import json
         parsed = json.loads(result.to_json())
         assert parsed["status"] == "ok"
+
+
+class TestAddOrgMetadata:
+    """Tests for add() setting org metadata on pins."""
+
+    @patch("community_cloud_storage.operations.ClusterClient")
+    def test_add_passes_org_metadata(self, mock_client_class, sample_config):
+        """add() should pass metadata={"org": profile} to client.add()."""
+        mock_client = MagicMock()
+        mock_client_class.return_value = mock_client
+        mock_client.add.return_value = [
+            {"name": "test.txt", "cid": "QmTEST", "size": 42},
+        ]
+        mock_client.pin_status.return_value = {
+            "cid": "QmTEST",
+            "name": "test",
+            "allocations": ["12D3KooWNAS", "12D3KooWCHLL"],
+            "peer_map": {
+                "12D3KooWNAS": {"peername": "nas", "status": "pinned", "error": ""},
+                "12D3KooWCHLL": {"peername": "chll", "status": "pinned", "error": ""},
+                "12D3KooWPeer3": {"peername": "peer3", "status": "pinned", "error": ""},
+                "12D3KooWPeer4": {"peername": "peer4", "status": "pinned", "error": ""},
+            },
+            "replication_factor_min": 2,
+            "replication_factor_max": 4,
+        }
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            f.write("test content")
+            path = Path(f.name)
+
+        try:
+            result = add(path, profile="hrdag", config=sample_config)
+            assert result.ok
+
+            # Verify metadata was passed to client.add()
+            call_kwargs = mock_client.add.call_args[1]
+            assert call_kwargs["metadata"] == {"org": "hrdag"}
+        finally:
+            path.unlink()
+
+    @patch("community_cloud_storage.operations.ClusterClient")
+    def test_add_orgB_metadata(self, mock_client_class, sample_config):
+        """add() with orgB profile sets metadata org=orgB."""
+        mock_client = MagicMock()
+        mock_client_class.return_value = mock_client
+        mock_client.add.return_value = [
+            {"name": "test.txt", "cid": "QmTEST", "size": 42},
+        ]
+        mock_client.pin_status.return_value = {
+            "cid": "QmTEST",
+            "allocations": ["12D3KooWMEER", "12D3KooWCHLL"],
+            "peer_map": {
+                "12D3KooWMEER": {"peername": "meerkat", "status": "pinned", "error": ""},
+                "12D3KooWCHLL": {"peername": "chll", "status": "pinned", "error": ""},
+                "12D3KooWPeer3": {"peername": "peer3", "status": "pinned", "error": ""},
+                "12D3KooWPeer4": {"peername": "peer4", "status": "pinned", "error": ""},
+            },
+            "replication_factor_min": 2,
+            "replication_factor_max": 4,
+        }
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            f.write("test")
+            path = Path(f.name)
+
+        try:
+            add(path, profile="orgB", config=sample_config)
+            call_kwargs = mock_client.add.call_args[1]
+            assert call_kwargs["metadata"] == {"org": "orgB"}
+        finally:
+            path.unlink()
+
+
+class TestTagPins:
+    """Tests for tag_pins() migration operation."""
+
+    @patch("community_cloud_storage.operations._get_client")
+    def test_tag_pins_tags_untagged(self, mock_get_client, sample_config):
+        """tag_pins tags pins that have no org metadata."""
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+
+        # Two pins, neither tagged
+        mock_client.pins.return_value = [
+            {
+                "cid": "QmAAA", "name": "fileA",
+                "allocations": ["12D3KooWNAS"],
+                "metadata": None,
+                "peer_map": {},
+                "replication_factor_min": 2, "replication_factor_max": 3,
+            },
+            {
+                "cid": "QmBBB", "name": "fileB",
+                "allocations": ["12D3KooWNAS"],
+                "metadata": None,
+                "peer_map": {},
+                "replication_factor_min": 2, "replication_factor_max": 3,
+            },
+        ]
+        mock_client.pin.return_value = {}
+
+        result = tag_pins(profile="hrdag", config=sample_config)
+
+        assert result["total"] == 2
+        assert result["tagged"] == 2
+        assert result["skipped"] == 0
+        assert result["errors"] == 0
+        assert mock_client.pin.call_count == 2
+
+        # Verify metadata was passed
+        for call in mock_client.pin.call_args_list:
+            assert call[1]["metadata"] == {"org": "hrdag"}
+
+    @patch("community_cloud_storage.operations._get_client")
+    def test_tag_pins_skips_already_tagged(self, mock_get_client, sample_config):
+        """tag_pins skips pins that already have correct org metadata."""
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+
+        mock_client.pins.return_value = [
+            {
+                "cid": "QmAAA", "name": "fileA",
+                "allocations": ["12D3KooWNAS"],
+                "metadata": {"org": "hrdag"},
+                "peer_map": {},
+                "replication_factor_min": 2, "replication_factor_max": 3,
+            },
+        ]
+
+        result = tag_pins(profile="hrdag", config=sample_config)
+
+        assert result["total"] == 1
+        assert result["tagged"] == 0
+        assert result["skipped"] == 1
+        mock_client.pin.assert_not_called()
+
+    @patch("community_cloud_storage.operations._get_client")
+    def test_tag_pins_dry_run(self, mock_get_client, sample_config):
+        """tag_pins dry run reports but doesn't modify."""
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+
+        mock_client.pins.return_value = [
+            {
+                "cid": "QmAAA", "name": "fileA",
+                "allocations": ["12D3KooWNAS"],
+                "metadata": None,
+                "peer_map": {},
+                "replication_factor_min": 2, "replication_factor_max": 3,
+            },
+        ]
+
+        result = tag_pins(profile="hrdag", config=sample_config, dry_run=True)
+
+        assert result["total"] == 1
+        assert result["tagged"] == 1  # would tag
+        assert result["dry_run"] is True
+        mock_client.pin.assert_not_called()
+
+    @patch("community_cloud_storage.operations._get_client")
+    def test_tag_pins_preserves_name(self, mock_get_client, sample_config):
+        """tag_pins preserves existing pin name when re-pinning."""
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+
+        mock_client.pins.return_value = [
+            {
+                "cid": "QmAAA", "name": "commit_2026-01-21",
+                "allocations": ["12D3KooWNAS"],
+                "metadata": None,
+                "peer_map": {},
+                "replication_factor_min": 2, "replication_factor_max": 3,
+            },
+        ]
+        mock_client.pin.return_value = {}
+
+        tag_pins(profile="hrdag", config=sample_config)
+
+        call_kwargs = mock_client.pin.call_args[1]
+        assert call_kwargs["name"] == "commit_2026-01-21"

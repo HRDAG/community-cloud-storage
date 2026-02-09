@@ -318,6 +318,61 @@ class TestRequestLibraryBehavior:
                 path.unlink()
 
 
+class TestMetadataParams:
+    """Tests for metadata support in query parameters."""
+
+    def test_build_add_params_with_metadata(self):
+        """Metadata dict produces meta-KEY=VALUE query params."""
+        client = ClusterClient("localhost")
+        result = client._build_add_params("test", metadata={"org": "hrdag"})
+        assert "meta-org=hrdag" in result
+        assert "name=test" in result
+
+    def test_build_add_params_with_multiple_metadata(self):
+        """Multiple metadata keys produce multiple meta- params."""
+        client = ClusterClient("localhost")
+        result = client._build_add_params("test", metadata={"org": "hrdag", "env": "prod"})
+        assert "meta-org=hrdag" in result
+        assert "meta-env=prod" in result
+
+    def test_build_add_params_no_metadata(self):
+        """No metadata param when metadata is None."""
+        client = ClusterClient("localhost")
+        result = client._build_add_params("test")
+        assert "meta-" not in result
+
+    def test_build_add_params_empty_metadata(self):
+        """No metadata param when metadata is empty dict."""
+        client = ClusterClient("localhost")
+        result = client._build_add_params("test", metadata={})
+        assert "meta-" not in result
+
+    def test_pin_with_metadata(self):
+        """client.pin() passes meta- params in endpoint."""
+        client = ClusterClient("localhost")
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"cid": "QmTEST", "metadata": {"org": "hrdag"}}
+
+        with patch.object(client, '_request', return_value=mock_response) as mock_req:
+            client.pin("QmTEST", name="test", metadata={"org": "hrdag"})
+            endpoint = mock_req.call_args[0][1]
+            assert "meta-org=hrdag" in endpoint
+            assert "name=test" in endpoint
+
+    def test_pin_without_metadata(self):
+        """client.pin() works without metadata (backward compatible)."""
+        client = ClusterClient("localhost")
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"cid": "QmTEST"}
+
+        with patch.object(client, '_request', return_value=mock_response) as mock_req:
+            client.pin("QmTEST", name="test")
+            endpoint = mock_req.call_args[0][1]
+            assert "meta-" not in endpoint
+
+
 class TestClusterAPIError:
     """Tests for ClusterAPIError exception."""
 
