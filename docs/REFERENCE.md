@@ -1,10 +1,11 @@
-# CCS Cluster Debugging Runbook
 Author: PB and Claude
-Date: 2026-02-08
+Date: 2026-02-09
 License: (c) HRDAG, 2026, GPL-2 or newer
 
 ---
-docs/runbook-cluster-debugging.md
+docs/REFERENCE.md
+
+# CCS Cluster Reference
 
 ## Architecture
 
@@ -13,6 +14,16 @@ docs/runbook-cluster-debugging.md
 - No `ipfs-cluster-ctl` needed from client — CCS uses HTTP API directly
 - Cluster uses CRDT consensus (no raft leader election)
 - Version: 1.1.5
+
+## Node Inventory
+
+| Node    | Tailscale IP | LAN IP        | Role    |
+|---------|-------------|---------------|---------|
+| nas     | 100.64.0.31 | 192.168.1.8   | primary (hrdag) |
+| chll    | 100.64.0.32 | 209.121.245.6 | backup  |
+| meerkat | 100.64.0.4  | 192.168.1.34  | primary (test-orgB) |
+| pihost  | 100.64.0.2  | 192.168.1.25  | primary (test-orgC) |
+| ipfs1   | 100.64.0.51 | 192.168.1.24  | primary (test-orgD) |
 
 ## Quick Health Check
 
@@ -40,19 +51,11 @@ curl -s -u "$AUTH" http://100.64.0.32:9094/id | jq .
 Note: cluster API returns NDJSON, not JSON arrays. Use `jq -s .` to collect
 into an array, or process line-by-line.
 
-## Node Inventory
+## Diagnostic Procedures
 
-| Node    | Tailscale IP | LAN IP        | Role    |
-|---------|-------------|---------------|---------|
-| nas     | 100.64.0.31 | 192.168.1.8   | primary (hrdag) |
-| chll    | 100.64.0.32 | 209.121.245.6 | backup  |
-| meerkat | 100.64.0.4  | 192.168.1.34  | primary (test-orgB) |
-| pihost  | 100.64.0.2  | 192.168.1.x   | primary (test-orgC) |
-| ipfs1   | 100.64.0.51 | 192.168.1.24  | primary (test-orgD) |
+### Node Not Responding
 
-## Diagnosis: Node Not Responding
-
-### Step 1: Check from client
+#### Step 1: Check from client
 
 ```bash
 # Ping Tailscale IP
@@ -63,11 +66,11 @@ curl -v -m5 -u "$AUTH" http://<tailscale-ip>:9094/id
 ```
 
 Results:
-- **Ping OK, port 9094 refused** → machine up, container down
-- **Ping OK, port 9094 timeout** → firewall or container not listening
-- **Ping fails** → machine offline or Tailscale down
+- **Ping OK, port 9094 refused** — machine up, container down
+- **Ping OK, port 9094 timeout** — firewall or container not listening
+- **Ping fails** — machine offline or Tailscale down
 
-### Step 2: SSH to the node
+#### Step 2: SSH to the node
 
 ```bash
 ssh <node>
@@ -83,7 +86,7 @@ sudo docker logs ccs-cluster --tail 50
 sudo docker inspect ccs-cluster --format='{{.State.Status}} restarts={{.RestartCount}}'
 ```
 
-### Step 3: Container in restart loop
+#### Step 3: Container in restart loop
 
 If `docker ps` shows "Restarting":
 
@@ -108,7 +111,7 @@ sudo docker inspect ccs-cluster | grep -i peer
 sudo ss -tlnp | grep 9094
 ```
 
-### Step 4: Container not running (exited)
+#### Step 4: Container not running (exited)
 
 ```bash
 # Check exit code
@@ -119,7 +122,7 @@ sudo docker start ccs-cluster
 sudo docker logs -f ccs-cluster  # watch startup
 ```
 
-## Diagnosis: Peer ID Mismatch
+### Peer ID Mismatch
 
 If a node's peer ID in `/etc/tfc/ccs.toml` doesn't match what the cluster
 sees, the container was likely recreated without preserving identity.
@@ -136,7 +139,7 @@ Fix: update `peer_id` in `/etc/tfc/ccs.toml` (or better, in ansible vars)
 to match the actual peer ID. The cluster identity is stored in the container's
 persistent volume — if that volume was lost, a new identity was generated.
 
-## Diagnosis: Stale Peer in Cluster
+### Stale Peer in Cluster
 
 If the cluster remembers a peer that no longer exists:
 
@@ -147,7 +150,7 @@ If the cluster remembers a peer that no longer exists:
 # or can be ignored.
 ```
 
-## Diagnosis: Disk Full
+### Disk Full
 
 If container logs show `disk quota exceeded` on lock file creation:
 
@@ -163,30 +166,21 @@ sudo du -sh /mnt/sda1/ccs/ipfs/ /mnt/sda1/ccs/ipfs-cluster/
 The cluster container will auto-restart once disk space is freed. No manual
 intervention needed beyond freeing space.
 
-### Moving IPFS data to a bigger disk
+### Disk Replacement
+
+Full procedure for replacing a data disk on a CCS node:
 
 1. Stop containers: `sudo docker compose -f /mnt/sda1/ccs/compose.yml down`
-2. rsync preserving permissions: `rsync -aHAX /mnt/sda1/ccs/ /mnt/newdisk/ccs/`
-3. Update compose.yml volume mounts (or symlink old path to new)
-4. Start containers: `sudo docker compose -f /path/to/compose.yml up -d`
+2. Physically swap the disk (or mount new disk at a temporary path)
+3. Partition + format: `sudo mkfs.ext4 /mnt/newdisk`
+4. Mount new disk and rsync preserving permissions:
+   `rsync -aHAX /mnt/sda1/ccs/ /mnt/newdisk/ccs/`
+5. Update `/etc/fstab` to mount new disk at the expected path
+6. Unmount old, remount new at original path
+7. Start containers: `sudo docker compose -f /mnt/sda1/ccs/compose.yml up -d`
 
 Important:
 - **Stop containers before copying** — badger DB is not safe to copy while running
 - **Preserve ownership/permissions** — containers run as specific uid
 - **Copy everything** — IPFS datastore + cluster state (identity keys, CRDT state)
 - If cluster identity is lost, peer gets a new ID (requires config update)
-
-## 2026-02-08 Incident Notes
-
-### pihost (100.64.0.2)
-- Machine up (ping OK), port 9094 connection refused
-- Container `ccs-cluster` in restart loop: **disk quota exceeded**
-- `/mnt/sda1` at 99% (7.2T/7.3T) — only 1TB is CCS, rest is other data
-- Not in any peer's `cluster_peers` list
-- **Fix**: free space on /mnt/sda1, container will auto-restart
-
-### ipfs1 (100.64.0.51)
-- Machine offline (Tailscale ping fails, port 9094 timeout)
-- Cluster remembers peer ID `12D3KooWEa7paY...` at this IP
-- Config has different peer_id `12D3KooWFdQri2...` (stale — container was recreated)
-- **Fix**: power on machine, update peer_id in config after verifying actual ID
