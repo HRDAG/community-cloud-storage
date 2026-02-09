@@ -1,26 +1,25 @@
 # Author: PB and Claude
-# Date: 2026-01-14
+# Date: 2026-02-08
 # License: (c) HRDAG, 2026, GPL-2 or newer
 #
 # ---
 # test/test_config.py
 
-"""Tests for CCS config module."""
+"""Tests for CCS config module (toml-based)."""
 
 import tempfile
 from pathlib import Path
 
 import pytest
-import yaml
 
 from community_cloud_storage.config import (
     CCSConfig,
     ClusterAuth,
     NodeConfig,
     ProfileConfig,
+    _deep_merge,
+    _load_auth,
     load_config,
-    parse_config,
-    save_config,
 )
 
 
@@ -156,109 +155,229 @@ class TestCCSConfig:
         assert any("nas" in w and "peer_id" in w for w in warnings)
 
 
-class TestParseConfig:
-    def test_minimal_config(self):
-        cfg = parse_config({})
-        assert cfg.auth is None
-        assert cfg.profiles == {}
+class TestDeepMerge:
+    def test_non_overlapping_sections(self):
+        base = {"org": {"name": "hrdag"}, "postgres": {"database": "scottfiles"}}
+        override = {"cluster": {"backup_node": "chll"}}
+        result = _deep_merge(base, override)
+        assert result["org"]["name"] == "hrdag"
+        assert result["cluster"]["backup_node"] == "chll"
 
-    def test_full_config(self):
-        raw = {
-            "cluster": {
-                "basic_auth_user": "admin",
-                "basic_auth_password": "secret",
-            },
-            "backup_node": "chll",
-            "default_node": "nas",
-            "profiles": {
-                "hrdag": {"primary": "nas"},
-            },
-            "nodes": {
-                "nas": {"host": "nas", "peer_id": "12D3"},
-                "chll": {"host": "chll", "peer_id": "45D6"},
-            },
-        }
-        cfg = parse_config(raw)
-        assert cfg.auth.user == "admin"
-        assert cfg.backup_node == "chll"
-        assert cfg.default_node == "nas"
-        assert "hrdag" in cfg.profiles
-        assert "nas" in cfg.nodes
-        assert "chll" in cfg.nodes
+    def test_section_level_merge(self):
+        base = {"cluster": {"default_node": "nas"}}
+        override = {"cluster": {"backup_node": "chll"}}
+        result = _deep_merge(base, override)
+        assert result["cluster"]["default_node"] == "nas"
+        assert result["cluster"]["backup_node"] == "chll"
+
+    def test_override_wins_on_conflict(self):
+        base = {"cluster": {"default_node": "nas"}}
+        override = {"cluster": {"default_node": "chll"}}
+        result = _deep_merge(base, override)
+        assert result["cluster"]["default_node"] == "chll"
+
+    def test_scalar_override(self):
+        base = {"version": 1}
+        override = {"version": 2}
+        result = _deep_merge(base, override)
+        assert result["version"] == 2
+
+    def test_empty_base(self):
+        result = _deep_merge({}, {"cluster": {"node": "x"}})
+        assert result == {"cluster": {"node": "x"}}
+
+    def test_empty_override(self):
+        base = {"cluster": {"node": "x"}}
+        result = _deep_merge(base, {})
+        assert result == {"cluster": {"node": "x"}}
 
 
-class TestLoadAndSaveConfig:
-    def test_load_config(self):
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
-            yaml.dump(
-                {
-                    "cluster": {"basic_auth_user": "admin", "basic_auth_password": "pw"},
-                    "backup_node": "chll",
-                },
-                f,
-            )
+class TestLoadAuth:
+    def test_valid_auth_file(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".auth", delete=False) as f:
+            f.write("admin:secretpass")
             path = Path(f.name)
 
         try:
-            cfg = load_config(path)
-            assert cfg.auth.user == "admin"
-            assert cfg.backup_node == "chll"
+            auth = _load_auth(path)
+            assert auth.user == "admin"
+            assert auth.password == "secretpass"
         finally:
             path.unlink()
 
-    def test_load_config_not_found(self):
+    def test_auth_file_with_colon_in_password(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".auth", delete=False) as f:
+            f.write("admin:pass:with:colons")
+            path = Path(f.name)
+
+        try:
+            auth = _load_auth(path)
+            assert auth.user == "admin"
+            assert auth.password == "pass:with:colons"
+        finally:
+            path.unlink()
+
+    def test_auth_file_with_trailing_newline(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".auth", delete=False) as f:
+            f.write("admin:secret\n")
+            path = Path(f.name)
+
+        try:
+            auth = _load_auth(path)
+            assert auth.user == "admin"
+            assert auth.password == "secret"
+        finally:
+            path.unlink()
+
+    def test_missing_auth_file(self):
         with pytest.raises(FileNotFoundError):
-            load_config(Path("/nonexistent/config.yml"))
+            _load_auth(Path("/nonexistent/auth"))
 
-    def test_save_config(self):
-        cfg = CCSConfig(
-            auth=ClusterAuth(user="admin", password="secret"),
-            backup_node="chll",
-            profiles={"hrdag": ProfileConfig(name="hrdag", primary="nas")},
-            nodes={"nas": NodeConfig(name="nas", host="nas", peer_id="12D3")},
-        )
+    def test_malformed_auth_file(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".auth", delete=False) as f:
+            f.write("no-colon-here")
+            path = Path(f.name)
 
+        try:
+            with pytest.raises(ValueError, match="Invalid auth file format"):
+                _load_auth(path)
+        finally:
+            path.unlink()
+
+
+class TestLoadConfig:
+    def _write_toml(self, tmpdir: Path, name: str, content: str) -> Path:
+        path = tmpdir / name
+        path.write_text(content)
+        return path
+
+    def test_load_full_config(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "config.yml"
-            save_config(cfg, path)
+            tmpdir = Path(tmpdir)
 
-            # Verify file exists and has correct permissions
-            assert path.exists()
-            assert (path.stat().st_mode & 0o777) == 0o600
+            auth_file = tmpdir / "auth"
+            auth_file.write_text("admin:pw")
 
-            # Reload and verify
-            loaded = load_config(path)
-            assert loaded.auth.user == "admin"
-            assert loaded.backup_node == "chll"
-            assert "hrdag" in loaded.profiles
-            assert "nas" in loaded.nodes
+            common = self._write_toml(tmpdir, "common.toml", """
+[org]
+name = "hrdag"
+""")
+            config = self._write_toml(tmpdir, "ccs.toml", f"""
+[cluster]
+backup_node = "chll"
+default_node = "nas"
+auth_file = "{auth_file}"
 
-    def test_round_trip(self):
-        """Config survives save/load cycle."""
-        original = CCSConfig(
-            auth=ClusterAuth(user="admin", password="secret"),
-            backup_node="chll",
-            default_node="nas",
-            profiles={
-                "hrdag": ProfileConfig(name="hrdag", primary="nas"),
-                "orgB": ProfileConfig(name="orgB", primary="meerkat"),
-            },
-            nodes={
-                "nas": NodeConfig(name="nas", host="nas", peer_id="12D3"),
-                "meerkat": NodeConfig(name="meerkat", host="meerkat", peer_id="45D6"),
-                "chll": NodeConfig(name="chll", host="chll", peer_id="78E9"),
-            },
-        )
+[profiles.hrdag]
+primary = "nas"
 
+[nodes.nas]
+host = "nas"
+peer_id = "12D3A"
+
+[nodes.chll]
+host = "chll"
+peer_id = "12D3B"
+""")
+            cfg = load_config(common_path=common, config_path=config)
+            assert cfg.auth.user == "admin"
+            assert cfg.backup_node == "chll"
+            assert cfg.default_node == "nas"
+            assert "hrdag" in cfg.profiles
+            assert "nas" in cfg.nodes
+            assert "chll" in cfg.nodes
+
+    def test_load_config_missing_ccs_toml(self):
+        with pytest.raises(FileNotFoundError):
+            load_config(
+                common_path=Path("/nonexistent/common.toml"),
+                config_path=Path("/nonexistent/ccs.toml"),
+            )
+
+    def test_load_config_missing_common_is_ok(self):
+        """common.toml is optional — missing file should not error."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "config.yml"
-            save_config(original, path)
-            loaded = load_config(path)
+            tmpdir = Path(tmpdir)
 
-            assert loaded.auth.user == original.auth.user
-            assert loaded.backup_node == original.backup_node
-            assert loaded.default_node == original.default_node
-            assert set(loaded.profiles.keys()) == set(original.profiles.keys())
-            assert set(loaded.nodes.keys()) == set(original.nodes.keys())
-            for name in loaded.nodes:
-                assert loaded.nodes[name].peer_id == original.nodes[name].peer_id
+            config = self._write_toml(tmpdir, "ccs.toml", """
+[cluster]
+backup_node = "chll"
+
+[nodes.chll]
+host = "chll"
+peer_id = "12D3"
+""")
+            cfg = load_config(
+                common_path=tmpdir / "no-such-common.toml",
+                config_path=config,
+            )
+            assert cfg.backup_node == "chll"
+            assert cfg.auth is None
+
+    def test_deep_merge_with_common(self):
+        """common.toml org section should survive merge with ccs.toml."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir = Path(tmpdir)
+
+            common = self._write_toml(tmpdir, "common.toml", """
+[org]
+name = "hrdag"
+
+[postgres]
+database = "scottfiles"
+""")
+            config = self._write_toml(tmpdir, "ccs.toml", """
+[cluster]
+backup_node = "chll"
+
+[nodes.chll]
+host = "chll"
+peer_id = "12D3"
+""")
+            cfg = load_config(common_path=common, config_path=config)
+            assert cfg.backup_node == "chll"
+
+    def test_config_no_auth_file(self):
+        """Config without auth_file should have auth=None."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir = Path(tmpdir)
+
+            config = self._write_toml(tmpdir, "ccs.toml", """
+[cluster]
+backup_node = "chll"
+
+[nodes.chll]
+host = "chll"
+peer_id = "12D3"
+""")
+            cfg = load_config(
+                common_path=tmpdir / "missing.toml",
+                config_path=config,
+            )
+            assert cfg.auth is None
+
+    def test_config_missing_auth_file_raises(self):
+        """auth_file pointing to nonexistent file should raise."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir = Path(tmpdir)
+
+            config = self._write_toml(tmpdir, "ccs.toml", """
+[cluster]
+auth_file = "/nonexistent/auth"
+backup_node = "chll"
+""")
+            with pytest.raises(FileNotFoundError, match="Auth file"):
+                load_config(
+                    common_path=tmpdir / "missing.toml",
+                    config_path=config,
+                )
+
+    def test_load_from_system_defaults(self):
+        """Loading from /etc/tfc/ defaults should work on this machine."""
+        cfg = load_config()
+        assert cfg.auth is not None
+        assert cfg.auth.user == "admin"
+        assert cfg.backup_node == "chll"
+        assert "hrdag" in cfg.profiles
+        assert "nas" in cfg.nodes
+        assert cfg.nodes["nas"].peer_id is not None

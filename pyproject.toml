@@ -10,6 +10,8 @@ dependencies = [
     "requests>=2.32.0",
     "requests-toolbelt>=1.0.0",
 ]
+# Note: pyyaml is still needed by compose.py (Docker Compose YAML handling).
+# config.py uses tomllib (stdlib, Python 3.11+) for toml config.
 packages = ["community_cloud_storage"]
 
 [project.urls]

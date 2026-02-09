@@ -12,20 +12,20 @@ import yaml
 from community_cloud_storage import config as config_module
 
 
-DEFAULT_CONFIG_PATH = config_module.DEFAULT_CONFIG_PATH
+DEFAULT_CONFIG_PATH = config_module.DEFAULT_CONFIG
 
 
 def load_config(config_path: Path = None) -> dict:
     """
-    Load cluster config from YAML file.
-    Default: ~/.ccs/config.yml
+    Load cluster config from toml files.
+    Default: /etc/tfc/common.toml + /etc/tfc/ccs.toml
 
     Returns dict with basic_auth_user, basic_auth_password, etc.
     This is a backward-compatible wrapper around config_module.load_config().
 
     For new code, use config_module.load_config() directly to get a CCSConfig object.
     """
-    ccs_config = config_module.load_config(config_path)
+    ccs_config = config_module.load_config(config_path=config_path)
 
     # Flatten for backward compatibility
     result = {}

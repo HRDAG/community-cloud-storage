@@ -31,7 +31,6 @@ from community_cloud_storage.config import (
     NodeConfig,
     ProfileConfig,
     load_config,
-    save_config,
 )
 
 # Types
@@ -68,7 +67,6 @@ __all__ = [
     "NodeConfig",
     "ProfileConfig",
     "load_config",
-    "save_config",
     # Types
     "AddResult",
     "CIDEntry",

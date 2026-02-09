@@ -1,0 +1,33 @@
+# CCS Configuration Example
+# Author: PB and Claude
+# Date: 2026-02-08
+#
+# Location: /etc/tfc/ccs.toml
+# Shared config: /etc/tfc/common.toml (provides [org], [postgres])
+#
+# Deep merge: common.toml is base, ccs.toml overrides at section level.
+# Secrets: never in toml files — auth lives in a separate file.
+
+[cluster]
+default_node = "nas"
+backup_node = "chll"
+auth_file = "/etc/tfc/keys/ccs-auth"   # contains "user:password"
+
+# Organization profiles: map org name to primary node
+[profiles.hrdag]
+primary = "nas"
+
+# Add more orgs as needed:
+# [profiles.orgB]
+# primary = "orgB-node"
+
+# Cluster nodes with peer IDs (populated by ansible after deploy)
+[nodes.nas]
+host = "100.64.0.31"                   # Tailscale IP for API access
+peer_id = "12D3KooW..."                # Cluster peer ID for allocations
+
+[nodes.chll]
+host = "100.64.0.32"
+peer_id = "12D3KooW..."
+
+# Add more nodes as they join the cluster

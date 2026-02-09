@@ -1,5 +1,5 @@
 # Author: PB and Claude
-# Date: 2026-01-14
+# Date: 2026-02-08
 # License: (c) HRDAG, 2026, GPL-2 or newer
 #
 # ---
@@ -8,38 +8,22 @@
 """
 CCS Configuration Management
 
-Config file location: ~/.ccs/config.yml
+Reads TFC toml convention:
+  /etc/tfc/common.toml  -- shared config (org name, postgres, ipfs endpoints)
+  /etc/tfc/ccs.toml     -- CCS-specific config (nodes, profiles, auth file path)
 
-Schema:
-    cluster:
-      basic_auth_user: admin
-      basic_auth_password: <secret>
-
-    backup_node: chll          # Shared backup node name
-
-    profiles:                  # Org -> primary node mapping
-      hrdag:
-        primary: nas
-      test-orgB:
-        primary: meerkat
-
-    nodes:                     # Node info (populated by ansible)
-      nas:
-        host: nas              # Hostname for API calls
-        peer_id: 12D3KooW...   # Cluster peer ID for allocations
-      meerkat:
-        host: meerkat
-        peer_id: 12D3KooW...
+Auth credentials live in a separate file referenced by [cluster].auth_file.
+Deep merge: common.toml is base, ccs.toml overrides at section level.
 """
 
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-import yaml
 
-
-DEFAULT_CONFIG_PATH = Path.home() / ".ccs" / "config.yml"
+DEFAULT_COMMON = Path("/etc/tfc/common.toml")
+DEFAULT_CONFIG = Path("/etc/tfc/ccs.toml")
 
 
 @dataclass
@@ -166,116 +150,97 @@ class CCSConfig:
 
         return errors, warnings
 
-    def to_dict(self) -> dict:
-        """Serialize config to dict (for saving)."""
-        result = {}
 
-        if self.auth:
-            result["cluster"] = {
-                "basic_auth_user": self.auth.user,
-                "basic_auth_password": self.auth.password,
-            }
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Merge override into base at section level.
 
-        if self.backup_node:
-            result["backup_node"] = self.backup_node
-
-        if self.default_node:
-            result["default_node"] = self.default_node
-
-        if self.profiles:
-            result["profiles"] = {
-                name: profile.to_dict() for name, profile in self.profiles.items()
-            }
-
-        if self.nodes:
-            result["nodes"] = {
-                name: node.to_dict() for name, node in self.nodes.items()
-            }
-
-        return result
-
-
-def load_config(config_path: Path = None) -> CCSConfig:
+    For top-level keys that are both dicts (TOML sections), merge their
+    contents with override winning on key conflict.
+    For non-dict values, override replaces base.
     """
-    Load CCS configuration from YAML file.
+    merged = dict(base)
+    for key, val in override.items():
+        if key in merged and isinstance(merged[key], dict) and isinstance(val, dict):
+            merged[key] = {**merged[key], **val}
+        else:
+            merged[key] = val
+    return merged
+
+
+def _load_auth(auth_file: Path) -> ClusterAuth:
+    """Read auth file containing 'user:password'.
+
+    Raises:
+        FileNotFoundError: If auth file doesn't exist
+        ValueError: If auth file format is invalid
+    """
+    if not auth_file.exists():
+        raise FileNotFoundError(f"Auth file not found: {auth_file}")
+
+    text = auth_file.read_text().strip()
+    if ":" not in text:
+        raise ValueError(f"Invalid auth file format (expected 'user:password'): {auth_file}")
+
+    user, password = text.split(":", 1)
+    return ClusterAuth(user=user, password=password)
+
+
+def load_config(
+    common_path: Path = None, config_path: Path = None
+) -> CCSConfig:
+    """Load config from common.toml + ccs.toml. Returns CCSConfig.
 
     Args:
-        config_path: Path to config file. Default: ~/.ccs/config.yml
+        common_path: Path to common.toml. Default: /etc/tfc/common.toml
+        config_path: Path to ccs.toml. Default: /etc/tfc/ccs.toml
 
     Returns:
         CCSConfig object
 
     Raises:
-        FileNotFoundError: If config file doesn't exist
-        ValueError: If config file is invalid
+        FileNotFoundError: If config files or auth file don't exist
+        ValueError: If config files are invalid
     """
-    path = config_path or DEFAULT_CONFIG_PATH
-    if not path.exists():
-        raise FileNotFoundError(f"Config file not found: {path}")
+    common_file = common_path or DEFAULT_COMMON
+    config_file = config_path or DEFAULT_CONFIG
 
-    with open(path) as f:
-        raw = yaml.safe_load(f)
+    # Load common.toml (optional — may not exist on minimal installs)
+    common = {}
+    if common_file.exists():
+        with open(common_file, "rb") as f:
+            common = tomllib.load(f)
 
-    if raw is None:
-        raw = {}
+    # Load ccs.toml (required)
+    if not config_file.exists():
+        raise FileNotFoundError(f"Config file not found: {config_file}")
 
-    return parse_config(raw)
+    with open(config_file, "rb") as f:
+        specific = tomllib.load(f)
 
+    config = _deep_merge(common, specific)
 
-def parse_config(raw: dict) -> CCSConfig:
-    """
-    Parse raw config dict into CCSConfig object.
+    # Parse cluster section
+    cluster = config.get("cluster", {})
 
-    Args:
-        raw: Dict from yaml.safe_load()
-
-    Returns:
-        CCSConfig object
-    """
-    # Parse auth
+    # Parse auth from file
     auth = None
-    if "cluster" in raw:
-        cluster = raw["cluster"]
-        if cluster.get("basic_auth_user") and cluster.get("basic_auth_password"):
-            auth = ClusterAuth(
-                user=cluster["basic_auth_user"],
-                password=cluster["basic_auth_password"],
-            )
+    if "auth_file" in cluster:
+        auth = _load_auth(Path(cluster["auth_file"]))
 
     # Parse profiles
     profiles = {}
-    if "profiles" in raw:
-        for name, data in raw["profiles"].items():
-            profiles[name] = ProfileConfig.from_dict(name, data)
+    for name, data in config.get("profiles", {}).items():
+        profiles[name] = ProfileConfig.from_dict(name, data)
 
     # Parse nodes
     nodes = {}
-    if "nodes" in raw:
-        for name, data in raw["nodes"].items():
-            nodes[name] = NodeConfig.from_dict(name, data)
+    for name, data in config.get("nodes", {}).items():
+        nodes[name] = NodeConfig.from_dict(name, data)
 
     return CCSConfig(
         auth=auth,
-        backup_node=raw.get("backup_node"),
-        default_node=raw.get("default_node"),
+        backup_node=cluster.get("backup_node"),
+        default_node=cluster.get("default_node"),
         profiles=profiles,
         nodes=nodes,
     )
-
-
-def save_config(config: CCSConfig, config_path: Path = None) -> None:
-    """
-    Save CCS configuration to YAML file.
-
-    Args:
-        config: CCSConfig object to save
-        config_path: Path to save to. Default: ~/.ccs/config.yml
-    """
-    path = config_path or DEFAULT_CONFIG_PATH
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(path, "w") as f:
-        yaml.dump(config.to_dict(), f, default_flow_style=False, sort_keys=False)
-
-    # Set restrictive permissions (config contains secrets)
-    path.chmod(0o600)

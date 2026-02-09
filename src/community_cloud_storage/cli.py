@@ -1,5 +1,5 @@
 # Author: PB and Claude
-# Date: 2026-01-14
+# Date: 2026-02-08
 # License: (c) HRDAG, 2026, GPL-2 or newer
 #
 # ---
@@ -61,7 +61,7 @@ def handle_api_error(func):
                 match = re.search(r"host='([^']+)'", msg)
                 if match:
                     click.echo(f"  Host: {match.group(1)}", err=True)
-            click.echo("  Check --cluster-peername value or config", err=True)
+            click.echo("  Check --host value or config", err=True)
             sys.exit(1)
         except requests.exceptions.RequestException as e:
             click.echo(f"Error: Network error: {e}", err=True)
@@ -71,10 +71,34 @@ def handle_api_error(func):
     return wrapper
 
 
+def _load_config(ctx) -> config_module.CCSConfig:
+    """Load config from Click context's common/config paths."""
+    obj = ctx.ensure_object(dict)
+    return config_module.load_config(
+        common_path=obj.get("common"),
+        config_path=obj.get("config"),
+    )
+
+
 @click.group()
-def cli():
+@click.option(
+    "--common",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help="Path to common.toml (default: /etc/tfc/common.toml)",
+)
+@click.option(
+    "--config",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help="Path to ccs.toml (default: /etc/tfc/ccs.toml)",
+)
+@click.pass_context
+def cli(ctx, common, config):
     """Community Cloud Storage CLI."""
-    pass
+    ctx.ensure_object(dict)
+    ctx.obj["common"] = common
+    ctx.obj["config"] = config
 
 
 # =============================================================================
@@ -89,11 +113,6 @@ def cli():
     help="Organization profile (e.g., hrdag). Determines primary node for allocation.",
 )
 @click.option(
-    "--config-file",
-    type=click.Path(exists=True, path_type=Path),
-    help="Config file path (default: ~/.ccs/config.yml)",
-)
-@click.option(
     "--host",
     callback=validate_peername,
     help="Override cluster host to talk to (default: from config)",
@@ -103,8 +122,9 @@ def cli():
     type=click.Path(path_type=Path),
     help="Write full result as JSON to this file",
 )
+@click.pass_context
 @handle_api_error
-def add(path: Path, profile: str, config_file: Path, host: str, output_json: Path) -> None:
+def add(ctx, path: Path, profile: str, host: str, output_json: Path) -> None:
     """
     Add a file or directory to the cluster.
 
@@ -118,7 +138,7 @@ def add(path: Path, profile: str, config_file: Path, host: str, output_json: Pat
 
         ccs add /path/to/directory --profile hrdag --output-json manifest.json
     """
-    config = config_module.load_config(config_file)
+    config = _load_config(ctx)
     result = operations.add(path, profile=profile, config=config, host=host)
 
     if result.complete:
@@ -139,44 +159,36 @@ def add(path: Path, profile: str, config_file: Path, host: str, output_json: Pat
 @cli.command()
 @click.argument("cid", required=True)
 @click.option(
-    "--config-file",
-    type=click.Path(exists=True, path_type=Path),
-    help="Config file path (default: ~/.ccs/config.yml)",
-)
-@click.option(
     "--host",
     callback=validate_peername,
     help="Override cluster host to talk to (default: from config)",
 )
+@click.pass_context
 @handle_api_error
-def status(cid: str, config_file: Path, host: str) -> None:
+def status(ctx, cid: str, host: str) -> None:
     """
     Get status of a CID in the cluster.
     """
-    config = config_module.load_config(config_file)
+    config = _load_config(ctx)
     result = operations.status(cid, config=config, host=host)
     click.echo(result.to_json())
 
 
 @cli.command()
 @click.option(
-    "--config-file",
-    type=click.Path(exists=True, path_type=Path),
-    help="Config file path (default: ~/.ccs/config.yml)",
-)
-@click.option(
     "--host",
     callback=validate_peername,
     help="Override cluster host to talk to (default: from config)",
 )
+@click.pass_context
 @handle_api_error
-def peers(config_file: Path, host: str) -> None:
+def peers(ctx, host: str) -> None:
     """
     List all peers in the cluster.
     """
     import json
 
-    config = config_module.load_config(config_file)
+    config = _load_config(ctx)
     result = operations.peers(config=config, host=host)
     output = [p.to_dict() for p in result]
     click.echo(json.dumps(output, indent=2))
@@ -184,23 +196,19 @@ def peers(config_file: Path, host: str) -> None:
 
 @cli.command()
 @click.option(
-    "--config-file",
-    type=click.Path(exists=True, path_type=Path),
-    help="Config file path (default: ~/.ccs/config.yml)",
-)
-@click.option(
     "--host",
     callback=validate_peername,
     help="Override cluster host to talk to (default: from config)",
 )
+@click.pass_context
 @handle_api_error
-def ls(config_file: Path, host: str) -> None:
+def ls(ctx, host: str) -> None:
     """
     List all pinned CIDs in the cluster.
     """
     import json
 
-    config = config_module.load_config(config_file)
+    config = _load_config(ctx)
     result = operations.ls(config=config, host=host)
     output = [p.to_dict() for p in result]
     click.echo(json.dumps(output, indent=2))
@@ -213,11 +221,6 @@ def ls(config_file: Path, host: str) -> None:
     help="Organization profile (e.g., hrdag). Determines required allocations.",
 )
 @click.option(
-    "--config-file",
-    type=click.Path(exists=True, path_type=Path),
-    help="Config file path (default: ~/.ccs/config.yml)",
-)
-@click.option(
     "--host",
     callback=validate_peername,
     help="Override cluster host to talk to (default: from config)",
@@ -227,8 +230,9 @@ def ls(config_file: Path, host: str) -> None:
     is_flag=True,
     help="Show what would change without modifying pins",
 )
+@click.pass_context
 @handle_api_error
-def ensure_pins(profile: str, config_file: Path, host: str, dry_run: bool) -> None:
+def ensure_pins(ctx, profile: str, host: str, dry_run: bool) -> None:
     """
     Ensure all pins include required allocations for a profile.
 
@@ -245,7 +249,7 @@ def ensure_pins(profile: str, config_file: Path, host: str, dry_run: bool) -> No
 
         ccs ensure-pins --profile hrdag
     """
-    config = config_module.load_config(config_file)
+    config = _load_config(ctx)
 
     try:
         allocs = operations._get_allocations(profile, config)
@@ -298,11 +302,6 @@ def ensure_pins(profile: str, config_file: Path, host: str, dry_run: bool) -> No
 
 @cli.command()
 @click.option(
-    "--config-file",
-    type=click.Path(exists=True, path_type=Path),
-    help="Config file path (default: ~/.ccs/config.yml)",
-)
-@click.option(
     "--validate-only",
     is_flag=True,
     help="Only validate config, don't display it",
@@ -312,7 +311,8 @@ def ensure_pins(profile: str, config_file: Path, host: str, dry_run: bool) -> No
     type=click.Path(path_type=Path),
     help="Write config as JSON to this file",
 )
-def config(config_file: Path, validate_only: bool, output_json: Path) -> None:
+@click.pass_context
+def config(ctx, validate_only: bool, output_json: Path) -> None:
     """
     Display and validate CCS configuration.
 
@@ -328,13 +328,14 @@ def config(config_file: Path, validate_only: bool, output_json: Path) -> None:
     """
     import json
 
-    config_path = config_file or config_module.DEFAULT_CONFIG_PATH
+    obj = ctx.ensure_object(dict)
+    config_path = obj.get("config") or config_module.DEFAULT_CONFIG
 
     try:
-        cfg = config_module.load_config(config_file)
+        cfg = _load_config(ctx)
     except FileNotFoundError:
         click.echo(f"Error: Config file not found: {config_path}", err=True)
-        click.echo(f"Create config at {config_path} or use --config-file", err=True)
+        click.echo(f"Create config at {config_path} or use --config", err=True)
         sys.exit(1)
 
     errors, warnings = cfg.validate()
@@ -417,24 +418,19 @@ def config(config_file: Path, validate_only: bool, output_json: Path) -> None:
 @cli.command("add-legacy")
 @click.option("--cluster-peername", required=True, callback=validate_peername)
 @click.option(
-    "--basic-auth-file",
-    type=click.Path(exists=True, path_type=Path),
-    help="Config file with basic auth credentials (default: ~/.ccs/config.yml)",
-)
-@click.option(
     "--cid-manifest",
     type=click.Path(path_type=Path),
     help="Write CID manifest JSON to this file",
 )
 @click.argument("path", type=click.Path(exists=True, path_type=Path), required=True)
 @handle_api_error
-def add_legacy(cluster_peername: str, basic_auth_file: Path, cid_manifest: Path, path: Path) -> None:
+def add_legacy(cluster_peername: str, cid_manifest: Path, path: Path) -> None:
     """
     [Legacy] Add a file or directory without profile-based allocation.
 
     Use 'ccs add --profile <name>' instead for proper allocation.
     """
-    config = compose.load_config(basic_auth_file)
+    config = compose.load_config()
     basic_auth = compose.get_basic_auth_string(config)
 
     click.echo(f"adding {path} to {cluster_peername}")
@@ -453,20 +449,15 @@ def add_legacy(cluster_peername: str, basic_auth_file: Path, cid_manifest: Path,
 
 @cli.command()
 @click.option("--cluster-peername", required=True, callback=validate_peername)
-@click.option(
-    "--basic-auth-file",
-    type=click.Path(exists=True, path_type=Path),
-    help="Config file with basic auth credentials",
-)
 @click.argument("cid", required=True)
 @handle_api_error
-def rm(cid: str, cluster_peername: str, basic_auth_file: Path) -> None:
+def rm(cid: str, cluster_peername: str) -> None:
     """
     Remove a CID from the cluster.
     """
     import json
 
-    config = compose.load_config(basic_auth_file)
+    config = compose.load_config()
     basic_auth = compose.get_basic_auth_string(config)
     result = compose.rm(cid, host=cluster_peername, basic_auth=basic_auth)
     click.echo(json.dumps(result, indent=2))
@@ -485,17 +476,13 @@ def rm(cid: str, cluster_peername: str, basic_auth_file: Path) -> None:
     help="Organization profile (prefers profile's primary node for download)",
 )
 @click.option(
-    "--config-file",
-    type=click.Path(exists=True, path_type=Path),
-    help="Config file path (default: ~/.ccs/config.yml)",
-)
-@click.option(
     "--host",
     callback=validate_peername,
     help="Override cluster host for status query (default: from config)",
 )
+@click.pass_context
 @handle_api_error
-def get(cid: str, dest: Path, profile: str, config_file: Path, host: str) -> None:
+def get(ctx, cid: str, dest: Path, profile: str, host: str) -> None:
     """
     Download content from IPFS cluster by CID.
 
@@ -513,7 +500,7 @@ def get(cid: str, dest: Path, profile: str, config_file: Path, host: str) -> Non
         # Download preferring hrdag's primary node
         ccs get QmTEST --dest ./output.txt --profile hrdag
     """
-    config = config_module.load_config(config_file)
+    config = _load_config(ctx)
     operations.get(cid=cid, dest=dest, config=config, profile=profile, host=host)
     click.echo(f"Downloaded {cid} to {dest}")
 
