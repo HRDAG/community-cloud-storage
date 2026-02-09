@@ -173,6 +173,21 @@ class ClusterClient:
         response = self._request("POST", endpoint)
         return response.json()
 
+    def recover(self, cid: str) -> dict:
+        """Trigger recovery for a pin in error state.
+
+        Calls POST /pins/{cid}/recover which retries the pin operation
+        using existing allocations. Preserves name, metadata, and allocations.
+
+        Args:
+            cid: The CID to recover
+
+        Returns:
+            Pin status dict from cluster response
+        """
+        response = self._request("POST", f"/pins/{cid}/recover")
+        return response.json()
+
     def unpin(self, cid: str) -> dict:
         """
         Remove a pin from the cluster.

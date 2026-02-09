@@ -416,3 +416,74 @@ class HealthReport:
         if self.status == "degraded":
             return 1
         return 2
+
+
+# Return codes for RepairResult
+RC_REPAIR_CLEAN = 0         # No broken pins found
+RC_REPAIR_FIXED = 1         # Broken pins found, recovery triggered
+RC_REPAIR_LOST = 2          # Lost pins exist (data unrecoverable)
+
+
+@dataclass
+class BrokenPin:
+    """A pin with errors in its peer_map."""
+    cid: str
+    name: Optional[str]
+    recoverable: bool
+    error_nodes: list[dict]         # [{"node": name, "error": msg}, ...]
+    healthy_nodes: list[str]        # Peernames with pinned/remote/pinning/pin_queued
+    recovered: bool = False
+    recover_error: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        d = {
+            "cid": self.cid,
+            "name": self.name,
+            "recoverable": self.recoverable,
+            "error_nodes": self.error_nodes,
+            "healthy_nodes": self.healthy_nodes,
+        }
+        if self.recovered:
+            d["recovered"] = True
+        if self.recover_error:
+            d["recover_error"] = self.recover_error
+        return d
+
+
+@dataclass
+class RepairResult:
+    """Result of repair operation."""
+    checked_at: datetime
+    total_pins: int
+    broken: int
+    recoverable: int
+    lost: int
+    recovered: int
+    recover_errors: int
+    dry_run: bool
+    broken_pins: list[BrokenPin] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "checked_at": self.checked_at.isoformat(),
+            "total_pins": self.total_pins,
+            "broken": self.broken,
+            "recoverable": self.recoverable,
+            "lost": self.lost,
+            "recovered": self.recovered,
+            "recover_errors": self.recover_errors,
+            "dry_run": self.dry_run,
+            "broken_pins": [bp.to_dict() for bp in self.broken_pins],
+        }
+
+    def to_json(self, indent: int = 2) -> str:
+        return json.dumps(self.to_dict(), indent=indent)
+
+    @property
+    def exit_code(self) -> int:
+        """0=clean, 1=broken pins found, 2=lost pins exist."""
+        if self.lost > 0:
+            return RC_REPAIR_LOST
+        if self.broken > 0:
+            return RC_REPAIR_FIXED
+        return RC_REPAIR_CLEAN

@@ -23,6 +23,7 @@ from community_cloud_storage.operations import (
     add,
     health,
     peers,
+    repair,
     status,
     tag_pins,
     _get_allocations,
@@ -30,7 +31,13 @@ from community_cloud_storage.operations import (
     ConfigError,
     CCSError,
 )
-from community_cloud_storage.types import RC_FAILED, RC_CONFIG_ERROR
+from community_cloud_storage.types import (
+    RC_FAILED,
+    RC_CONFIG_ERROR,
+    RC_REPAIR_CLEAN,
+    RC_REPAIR_FIXED,
+    RC_REPAIR_LOST,
+)
 from community_cloud_storage.cluster_api import ClusterAPIError
 
 
@@ -587,6 +594,212 @@ class TestHealth:
         import json
         parsed = json.loads(result.to_json())
         assert parsed["status"] == "ok"
+
+
+class TestRepair:
+    """Tests for repair() operation."""
+
+    @patch("community_cloud_storage.operations._get_client")
+    def test_repair_no_broken_pins(self, mock_get_client, sample_config):
+        """All pins healthy -> broken=0, exit_code=0."""
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+
+        mock_client.pins.return_value = [
+            _make_pin("QmAAA", {
+                "12D3KooWNAS": ("nas", "pinned", None),
+                "12D3KooWCHLL": ("chll", "pinned", None),
+            }),
+        ]
+
+        result = repair(config=sample_config)
+
+        assert result.broken == 0
+        assert result.total_pins == 1
+        assert result.exit_code == RC_REPAIR_CLEAN
+        mock_client.recover.assert_not_called()
+
+    @patch("community_cloud_storage.operations._get_client")
+    def test_repair_recoverable_pin(self, mock_get_client, sample_config):
+        """Pin with error on one node, pinned on another -> recoverable."""
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+
+        mock_client.pins.return_value = [
+            _make_pin("QmBROKEN", {
+                "12D3KooWNAS": ("nas", "pinned", None),
+                "12D3KooWCHLL": ("chll", "pin_error", "context canceled"),
+            }),
+        ]
+        mock_client.recover.return_value = {}
+
+        result = repair(config=sample_config)
+
+        assert result.broken == 1
+        assert result.recoverable == 1
+        assert result.lost == 0
+        assert result.recovered == 1
+        assert result.exit_code == RC_REPAIR_FIXED
+        mock_client.recover.assert_called_once_with("QmBROKEN")
+
+    @patch("community_cloud_storage.operations._get_client")
+    def test_repair_lost_pin(self, mock_get_client, sample_config):
+        """Pin with error on ALL nodes -> lost, no recovery attempted."""
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+
+        mock_client.pins.return_value = [
+            _make_pin("QmLOST", {
+                "12D3KooWNAS": ("nas", "pin_error", "context canceled"),
+                "12D3KooWCHLL": ("chll", "pin_error", "context canceled"),
+            }),
+        ]
+
+        result = repair(config=sample_config)
+
+        assert result.broken == 1
+        assert result.recoverable == 0
+        assert result.lost == 1
+        assert result.exit_code == RC_REPAIR_LOST
+        mock_client.recover.assert_not_called()
+
+    @patch("community_cloud_storage.operations._get_client")
+    def test_repair_mixed(self, mock_get_client, sample_config):
+        """One recoverable + one lost -> exit_code=2 (lost trumps)."""
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+
+        mock_client.pins.return_value = [
+            _make_pin("QmRECOVER", {
+                "12D3KooWNAS": ("nas", "pinned", None),
+                "12D3KooWCHLL": ("chll", "pin_error", "context canceled"),
+            }),
+            _make_pin("QmLOST", {
+                "12D3KooWNAS": ("nas", "error", "gone"),
+                "12D3KooWCHLL": ("chll", "pin_error", "gone"),
+            }),
+        ]
+        mock_client.recover.return_value = {}
+
+        result = repair(config=sample_config)
+
+        assert result.broken == 2
+        assert result.recoverable == 1
+        assert result.lost == 1
+        assert result.recovered == 1
+        assert result.exit_code == RC_REPAIR_LOST
+        mock_client.recover.assert_called_once_with("QmRECOVER")
+
+    @patch("community_cloud_storage.operations._get_client")
+    def test_repair_dry_run(self, mock_get_client, sample_config):
+        """Dry run reports but does not recover."""
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+
+        mock_client.pins.return_value = [
+            _make_pin("QmBROKEN", {
+                "12D3KooWNAS": ("nas", "pinned", None),
+                "12D3KooWCHLL": ("chll", "pin_error", "context canceled"),
+            }),
+        ]
+
+        result = repair(config=sample_config, dry_run=True)
+
+        assert result.broken == 1
+        assert result.recoverable == 1
+        assert result.dry_run is True
+        mock_client.recover.assert_not_called()
+
+    @patch("community_cloud_storage.operations._get_client")
+    def test_repair_recover_error_handled(self, mock_get_client, sample_config):
+        """Recovery failure is caught, not propagated."""
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+
+        mock_client.pins.return_value = [
+            _make_pin("QmBROKEN", {
+                "12D3KooWNAS": ("nas", "pinned", None),
+                "12D3KooWCHLL": ("chll", "pin_error", "context canceled"),
+            }),
+        ]
+        mock_client.recover.side_effect = Exception("connection refused")
+
+        result = repair(config=sample_config)
+
+        assert result.recovered == 0
+        assert result.recover_errors == 1
+        assert result.broken_pins[0].recover_error == "connection refused"
+
+    @patch("community_cloud_storage.operations._get_client")
+    def test_repair_pinning_not_lost(self, mock_get_client, sample_config):
+        """Pin with error + pinning on another node -> recoverable, NOT lost."""
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+
+        mock_client.pins.return_value = [
+            _make_pin("QmPINNING", {
+                "12D3KooWNAS": ("nas", "pinning", None),
+                "12D3KooWCHLL": ("chll", "pin_error", "context canceled"),
+            }),
+        ]
+        mock_client.recover.return_value = {}
+
+        result = repair(config=sample_config)
+
+        assert result.broken == 1
+        assert result.recoverable == 1
+        assert result.lost == 0
+
+    @patch("community_cloud_storage.operations._get_client")
+    def test_repair_pin_queued_not_lost(self, mock_get_client, sample_config):
+        """Pin with error + pin_queued on another node -> recoverable, NOT lost."""
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+
+        mock_client.pins.return_value = [
+            _make_pin("QmQUEUED", {
+                "12D3KooWNAS": ("nas", "pin_queued", None),
+                "12D3KooWCHLL": ("chll", "pin_error", "context canceled"),
+            }),
+        ]
+        mock_client.recover.return_value = {}
+
+        result = repair(config=sample_config)
+
+        assert result.broken == 1
+        assert result.recoverable == 1
+        assert result.lost == 0
+
+    @patch("community_cloud_storage.operations._get_client")
+    def test_repair_json_output(self, mock_get_client, sample_config):
+        """RepairResult.to_json() produces valid JSON with all keys."""
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+
+        mock_client.pins.return_value = [
+            _make_pin("QmBROKEN", {
+                "12D3KooWNAS": ("nas", "pinned", None),
+                "12D3KooWCHLL": ("chll", "pin_error", "context canceled"),
+            }),
+        ]
+        mock_client.recover.return_value = {}
+
+        result = repair(config=sample_config)
+
+        import json
+        parsed = json.loads(result.to_json())
+        assert "checked_at" in parsed
+        assert parsed["total_pins"] == 1
+        assert parsed["broken"] == 1
+        assert parsed["recoverable"] == 1
+        assert parsed["lost"] == 0
+        assert parsed["recovered"] == 1
+        assert parsed["dry_run"] is False
+        assert len(parsed["broken_pins"]) == 1
+        bp = parsed["broken_pins"][0]
+        assert bp["cid"] == "QmBROKEN"
+        assert bp["recoverable"] is True
+        assert bp["recovered"] is True
 
 
 class TestAddOrgMetadata:

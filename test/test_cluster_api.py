@@ -373,6 +373,24 @@ class TestMetadataParams:
             assert "meta-" not in endpoint
 
 
+class TestRecover:
+    """Tests for ClusterClient.recover() method."""
+
+    @patch.object(ClusterClient, '_request')
+    def test_recover_calls_correct_endpoint(self, mock_request):
+        """recover() calls POST /pins/{cid}/recover."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"cid": "QmTEST", "name": "test"}
+        mock_request.return_value = mock_response
+
+        client = ClusterClient("localhost")
+        result = client.recover("QmTEST")
+
+        mock_request.assert_called_once_with("POST", "/pins/QmTEST/recover")
+        assert result == {"cid": "QmTEST", "name": "test"}
+
+
 class TestClusterAPIError:
     """Tests for ClusterAPIError exception."""
 

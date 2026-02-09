@@ -267,6 +267,103 @@ def health(ctx, host: str, output_json_flag: bool, output: Path) -> None:
     callback=validate_peername,
     help="Override cluster host to talk to (default: from config)",
 )
+@click.option("--json", "output_json_flag", is_flag=True, help="Output JSON")
+@click.option(
+    "--output",
+    type=click.Path(path_type=Path),
+    help="Write JSON to file (implies JSON format)",
+)
+@click.option("--dry-run", is_flag=True, help="Show what would be repaired without modifying")
+@click.pass_context
+@handle_api_error
+def repair(ctx, host: str, output_json_flag: bool, output: Path, dry_run: bool) -> None:
+    """
+    Detect and repair broken pins in the cluster.
+
+    Scans all pins for error statuses, classifies each as recoverable
+    (data exists on at least one node) or lost (no node has the data),
+    and triggers cluster recovery for recoverable CIDs.
+
+    Exit codes: 0=no broken pins, 1=repairs made, 2=lost pins found.
+
+    Examples:
+
+        ccs repair --dry-run
+
+        ccs repair --json
+
+        ccs repair --output /tmp/repair.json
+    """
+    config = _load_config(ctx)
+    result = operations.repair(config=config, host=host, dry_run=dry_run)
+
+    if output:
+        with open(output, "w") as f:
+            f.write(result.to_json())
+        click.echo(f"Repair report written to: {output}")
+        sys.exit(result.exit_code)
+
+    if output_json_flag:
+        click.echo(result.to_json())
+        sys.exit(result.exit_code)
+
+    # Human-readable output
+    prefix = "repair [DRY RUN]" if dry_run else "repair"
+    click.echo(f"{prefix}: scanned {result.total_pins} pins, found {result.broken} broken")
+
+    if not result.broken_pins:
+        sys.exit(result.exit_code)
+
+    click.echo()
+
+    # Recoverable pins
+    recoverable = [bp for bp in result.broken_pins if bp.recoverable]
+    if recoverable:
+        click.echo(f"recoverable ({len(recoverable)}):")
+        for bp in recoverable:
+            cid_short = bp.cid[:20] + "..." if len(bp.cid) > 20 else bp.cid
+            name_str = f"  {bp.name}" if bp.name else ""
+            click.echo(f"  {cid_short}{name_str}")
+            errors_str = ", ".join(f"{e['node']} ({e['error']})" for e in bp.error_nodes)
+            click.echo(f"    errors: {errors_str}")
+            healthy_str = ", ".join(bp.healthy_nodes)
+            click.echo(f"    healthy: {healthy_str}")
+            if bp.recovered:
+                click.echo("    -> recovered")
+            elif bp.recover_error:
+                click.echo(f"    -> error: {bp.recover_error}")
+            elif dry_run:
+                click.echo("    -> would recover")
+    else:
+        click.echo("recoverable (0): none")
+
+    # Lost pins
+    click.echo()
+    lost = [bp for bp in result.broken_pins if not bp.recoverable]
+    if lost:
+        click.echo(f"lost ({len(lost)}):")
+        for bp in lost:
+            cid_short = bp.cid[:20] + "..." if len(bp.cid) > 20 else bp.cid
+            name_str = f"  {bp.name}" if bp.name else ""
+            click.echo(f"  {cid_short}{name_str}")
+            errors_str = ", ".join(f"{e['node']} ({e['error']})" for e in bp.error_nodes)
+            click.echo(f"    errors: {errors_str}")
+            click.echo("    healthy: (none)")
+    else:
+        click.echo("lost (0): none")
+
+    click.echo()
+    click.echo(f"summary: {result.recovered} recovered, {result.recover_errors} errors, {result.lost} lost")
+
+    sys.exit(result.exit_code)
+
+
+@cli.command()
+@click.option(
+    "--host",
+    callback=validate_peername,
+    help="Override cluster host to talk to (default: from config)",
+)
 @click.pass_context
 @handle_api_error
 def ls(ctx, host: str) -> None:

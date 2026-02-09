@@ -22,16 +22,21 @@ from community_cloud_storage.cluster_api import ClusterClient, ClusterAPIError, 
 from community_cloud_storage.config import CCSConfig
 from community_cloud_storage.types import (
     AddResult,
+    BrokenPin,
     CIDEntry,
     EnsurePinsResult,
     HealthReport,
     NodeHealth,
     PeerInfo,
     PinStatus,
+    RepairResult,
     RC_SUCCESS,
     RC_PARTIAL,
     RC_FAILED,
     RC_CONFIG_ERROR,
+    RC_REPAIR_CLEAN,
+    RC_REPAIR_FIXED,
+    RC_REPAIR_LOST,
 )
 
 
@@ -718,6 +723,94 @@ def health(
         pins_total=len(all_pins),
         nodes=nodes,
         pin_errors=pin_errors,
+    )
+
+
+def repair(
+    config: CCSConfig,
+    host: str = None,
+    dry_run: bool = False,
+) -> RepairResult:
+    """Detect and recover broken pins in the cluster.
+
+    Scans all pins for error statuses, classifies each as recoverable
+    (data exists on at least one node) or lost (no node has the data),
+    and triggers cluster recovery for recoverable pins.
+
+    Uses POST /pins/{cid}/recover which retries using existing allocations,
+    preserving name, metadata, and allocations automatically.
+
+    Args:
+        config: CCSConfig with auth
+        host: Override which cluster node to talk to
+        dry_run: If True, report what would be recovered without modifying
+
+    Returns:
+        RepairResult with counts and broken pin details
+    """
+    client = _get_client(config, host)
+    raw_pins = client.pins()
+
+    error_statuses = {"pin_error", "error"}
+    healthy_statuses = {"pinned", "remote", "pinning", "pin_queued"}
+
+    broken_pins = []
+    for pin in raw_pins:
+        peer_map = pin.get("peer_map", {})
+
+        error_nodes = []
+        healthy_nodes = []
+        for peer_id, peer_info in peer_map.items():
+            st = peer_info.get("status", "")
+            if st in error_statuses:
+                error_nodes.append({
+                    "node": peer_info.get("peername", peer_id),
+                    "error": peer_info.get("error") or "unknown error",
+                })
+            elif st in healthy_statuses:
+                healthy_nodes.append(peer_info.get("peername", peer_id))
+
+        if not error_nodes:
+            continue
+
+        bp = BrokenPin(
+            cid=pin["cid"],
+            name=pin.get("name") or None,
+            recoverable=len(healthy_nodes) > 0,
+            error_nodes=error_nodes,
+            healthy_nodes=healthy_nodes,
+        )
+        broken_pins.append(bp)
+
+    # Attempt recovery for recoverable pins
+    recovered = 0
+    recover_errors = 0
+    for bp in broken_pins:
+        if not bp.recoverable:
+            continue
+        if dry_run:
+            continue
+        try:
+            client.recover(bp.cid)
+            bp.recovered = True
+            recovered += 1
+        except Exception as e:
+            bp.recover_error = str(e)
+            recover_errors += 1
+
+    recoverable_count = sum(1 for bp in broken_pins if bp.recoverable)
+    lost_count = sum(1 for bp in broken_pins if not bp.recoverable)
+
+    return RepairResult(
+        checked_at=datetime.now(timezone.utc),
+        total_pins=len(raw_pins),
+        broken=len(broken_pins),
+        recoverable=recoverable_count,
+        lost=lost_count,
+        recovered=recovered,
+        recover_errors=recover_errors,
+        dry_run=dry_run,
+        broken_pins=broken_pins,
     )
 
 
