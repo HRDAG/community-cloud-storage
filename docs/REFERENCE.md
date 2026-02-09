@@ -25,13 +25,35 @@ docs/REFERENCE.md
 | pihost  | 100.64.0.2  | 192.168.1.25  | primary (test-orgC) |
 | ipfs1   | 100.64.0.51 | 192.168.1.24  | primary (test-orgD) |
 
+## CCS Commands
+
+| Command | Purpose |
+|---------|---------|
+| `ccs add <path> --profile <name>` | Add file/directory to cluster with org+size metadata |
+| `ccs status <cid>` | Show pin status across all nodes |
+| `ccs ls` | List all pinned CIDs |
+| `ccs peers` | List cluster peers and online status |
+| `ccs health` | Cluster health summary (exit: 0=ok, 1=degraded, 2=error) |
+| `ccs repair` | Detect and recover broken pins (exit: 0=clean, 1=fixed, 2=lost) |
+| `ccs ensure-pins --profile <name>` | Fix allocation policy gaps |
+| `ccs get <cid> --dest <path>` | Download a pinned CID |
+| `ccs config --validate-only` | Validate configuration |
+
+Most commands support `--host`, `--json`, `--output`, `--dry-run` where applicable.
+
 ## Quick Health Check
 
 From any machine with CCS installed:
 
 ```bash
+# Cluster health summary (peers + pin errors)
+uv run ccs health
+
 # List all peers and their status
 uv run ccs peers
+
+# Detect and fix broken pins
+uv run ccs repair --dry-run
 
 # Validate config
 uv run ccs config --validate-only
