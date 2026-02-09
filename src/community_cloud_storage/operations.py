@@ -50,6 +50,32 @@ class AllocationError(CCSError):
     pass
 
 
+def _get_dag_size(gateway_host: str, cid: str) -> int | None:
+    """Get total DAG size for a CID via IPFS gateway dag-json.
+
+    Queries the gateway's dag-json format which includes Tsize
+    (cumulative DAG size) for each link in the root node.
+
+    Args:
+        gateway_host: Gateway host (IP or hostname), port 8080 assumed
+        cid: IPFS CID to measure
+
+    Returns:
+        Total size in bytes, or None if lookup fails
+    """
+    try:
+        resp = requests.get(
+            f"http://{gateway_host}:8080/ipfs/{cid}?format=dag-json",
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        links = data.get("Links", [])
+        return sum(link.get("Tsize", 0) for link in links)
+    except Exception:
+        return None
+
+
 def _get_client(config: CCSConfig, host: str = None) -> ClusterClient:
     """Create a ClusterClient from config."""
     if host is None:
@@ -173,6 +199,12 @@ def add(
             replica_count=None,
         )
 
+    # Calculate content size for metadata
+    if path.is_file():
+        content_size = path.stat().st_size
+    else:
+        content_size = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+
     # Add to cluster with allocations
     try:
         entries_raw = client.add(
@@ -180,7 +212,7 @@ def add(
             recursive=recursive,
             name=path.name,
             allocations=allocations,
-            metadata={"org": profile},
+            metadata={"org": profile, "size": str(content_size)},
         )
     except ClusterAPIError as e:
         return AddResult(
@@ -695,10 +727,11 @@ def tag_pins(
     host: str = None,
     dry_run: bool = False,
 ) -> dict:
-    """Tag all pins with org metadata for multi-org rebalancing.
+    """Tag all pins with org and size metadata.
 
-    One-time migration: reads all pins, sets metadata={"org": profile}
-    on each that doesn't already have it.
+    Reads all pins, sets metadata={"org": profile, "size": bytes} on
+    each that doesn't already have both. Size is fetched from the IPFS
+    gateway's dag-json endpoint.
 
     Args:
         profile: Organization profile name (e.g., "hrdag")
@@ -712,15 +745,36 @@ def tag_pins(
     client = _get_client(config, host)
     all_pins = client.pins()
 
+    # Resolve gateway host (same node, port 8080)
+    gateway_host = host or config.default_node
+    node = config.get_node(gateway_host)
+    if node:
+        gateway_host = node.host
+
     tagged = 0
     skipped = 0
     errors = 0
 
     for pin in all_pins:
         existing_meta = pin.get("metadata") or {}
-        if existing_meta.get("org") == profile:
+        has_org = existing_meta.get("org") == profile
+        has_size = "size" in existing_meta
+
+        if has_org and has_size:
             skipped += 1
             continue
+
+        # Fetch size if not already known
+        if has_size:
+            size_str = existing_meta["size"]
+        else:
+            size_val = _get_dag_size(gateway_host, pin["cid"])
+            size_str = str(size_val) if size_val is not None else None
+
+        # Build metadata
+        meta = {"org": profile}
+        if size_str is not None:
+            meta["size"] = size_str
 
         tagged += 1
         if not dry_run:
@@ -728,7 +782,7 @@ def tag_pins(
                 client.pin(
                     pin["cid"],
                     name=pin.get("name"),
-                    metadata={"org": profile},
+                    metadata=meta,
                 )
             except Exception:
                 errors += 1

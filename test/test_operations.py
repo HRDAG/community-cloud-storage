@@ -590,11 +590,11 @@ class TestHealth:
 
 
 class TestAddOrgMetadata:
-    """Tests for add() setting org metadata on pins."""
+    """Tests for add() setting org and size metadata on pins."""
 
     @patch("community_cloud_storage.operations.ClusterClient")
-    def test_add_passes_org_metadata(self, mock_client_class, sample_config):
-        """add() should pass metadata={"org": profile} to client.add()."""
+    def test_add_passes_org_and_size_metadata(self, mock_client_class, sample_config):
+        """add() should pass metadata with org and size to client.add()."""
         mock_client = MagicMock()
         mock_client_class.return_value = mock_client
         mock_client.add.return_value = [
@@ -622,15 +622,18 @@ class TestAddOrgMetadata:
             result = add(path, profile="hrdag", config=sample_config)
             assert result.ok
 
-            # Verify metadata was passed to client.add()
+            # Verify metadata includes both org and size
             call_kwargs = mock_client.add.call_args[1]
-            assert call_kwargs["metadata"] == {"org": "hrdag"}
+            assert call_kwargs["metadata"]["org"] == "hrdag"
+            assert "size" in call_kwargs["metadata"]
+            # Size should be the file size as a string
+            assert call_kwargs["metadata"]["size"] == str(path.stat().st_size)
         finally:
             path.unlink()
 
     @patch("community_cloud_storage.operations.ClusterClient")
     def test_add_orgB_metadata(self, mock_client_class, sample_config):
-        """add() with orgB profile sets metadata org=orgB."""
+        """add() with orgB profile sets metadata org=orgB with size."""
         mock_client = MagicMock()
         mock_client_class.return_value = mock_client
         mock_client.add.return_value = [
@@ -656,21 +659,23 @@ class TestAddOrgMetadata:
         try:
             add(path, profile="orgB", config=sample_config)
             call_kwargs = mock_client.add.call_args[1]
-            assert call_kwargs["metadata"] == {"org": "orgB"}
+            assert call_kwargs["metadata"]["org"] == "orgB"
+            assert "size" in call_kwargs["metadata"]
         finally:
             path.unlink()
 
 
 class TestTagPins:
-    """Tests for tag_pins() migration operation."""
+    """Tests for tag_pins() migration operation (org + size metadata)."""
 
+    @patch("community_cloud_storage.operations._get_dag_size")
     @patch("community_cloud_storage.operations._get_client")
-    def test_tag_pins_tags_untagged(self, mock_get_client, sample_config):
-        """tag_pins tags pins that have no org metadata."""
+    def test_tag_pins_tags_untagged(self, mock_get_client, mock_dag_size, sample_config):
+        """tag_pins tags pins with both org and size metadata."""
         mock_client = MagicMock()
         mock_get_client.return_value = mock_client
+        mock_dag_size.side_effect = [500000, 1000000]  # sizes for 2 pins
 
-        # Two pins, neither tagged
         mock_client.pins.return_value = [
             {
                 "cid": "QmAAA", "name": "fileA",
@@ -697,13 +702,16 @@ class TestTagPins:
         assert result["errors"] == 0
         assert mock_client.pin.call_count == 2
 
-        # Verify metadata was passed
-        for call in mock_client.pin.call_args_list:
-            assert call[1]["metadata"] == {"org": "hrdag"}
+        # Verify both org and size metadata were set
+        call1 = mock_client.pin.call_args_list[0][1]
+        assert call1["metadata"] == {"org": "hrdag", "size": "500000"}
+        call2 = mock_client.pin.call_args_list[1][1]
+        assert call2["metadata"] == {"org": "hrdag", "size": "1000000"}
 
+    @patch("community_cloud_storage.operations._get_dag_size")
     @patch("community_cloud_storage.operations._get_client")
-    def test_tag_pins_skips_already_tagged(self, mock_get_client, sample_config):
-        """tag_pins skips pins that already have correct org metadata."""
+    def test_tag_pins_skips_fully_tagged(self, mock_get_client, mock_dag_size, sample_config):
+        """tag_pins skips pins that already have both org and size."""
         mock_client = MagicMock()
         mock_get_client.return_value = mock_client
 
@@ -711,7 +719,7 @@ class TestTagPins:
             {
                 "cid": "QmAAA", "name": "fileA",
                 "allocations": ["12D3KooWNAS"],
-                "metadata": {"org": "hrdag"},
+                "metadata": {"org": "hrdag", "size": "500000"},
                 "peer_map": {},
                 "replication_factor_min": 2, "replication_factor_max": 3,
             },
@@ -723,12 +731,42 @@ class TestTagPins:
         assert result["tagged"] == 0
         assert result["skipped"] == 1
         mock_client.pin.assert_not_called()
+        mock_dag_size.assert_not_called()
 
+    @patch("community_cloud_storage.operations._get_dag_size")
     @patch("community_cloud_storage.operations._get_client")
-    def test_tag_pins_dry_run(self, mock_get_client, sample_config):
+    def test_tag_pins_adds_missing_size(self, mock_get_client, mock_dag_size, sample_config):
+        """tag_pins re-pins when org is correct but size is missing."""
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+        mock_dag_size.return_value = 750000
+
+        mock_client.pins.return_value = [
+            {
+                "cid": "QmAAA", "name": "fileA",
+                "allocations": ["12D3KooWNAS"],
+                "metadata": {"org": "hrdag"},
+                "peer_map": {},
+                "replication_factor_min": 2, "replication_factor_max": 3,
+            },
+        ]
+        mock_client.pin.return_value = {}
+
+        result = tag_pins(profile="hrdag", config=sample_config)
+
+        assert result["total"] == 1
+        assert result["tagged"] == 1
+        assert result["skipped"] == 0
+        call_kwargs = mock_client.pin.call_args[1]
+        assert call_kwargs["metadata"] == {"org": "hrdag", "size": "750000"}
+
+    @patch("community_cloud_storage.operations._get_dag_size")
+    @patch("community_cloud_storage.operations._get_client")
+    def test_tag_pins_dry_run(self, mock_get_client, mock_dag_size, sample_config):
         """tag_pins dry run reports but doesn't modify."""
         mock_client = MagicMock()
         mock_get_client.return_value = mock_client
+        mock_dag_size.return_value = 500000
 
         mock_client.pins.return_value = [
             {
@@ -747,11 +785,13 @@ class TestTagPins:
         assert result["dry_run"] is True
         mock_client.pin.assert_not_called()
 
+    @patch("community_cloud_storage.operations._get_dag_size")
     @patch("community_cloud_storage.operations._get_client")
-    def test_tag_pins_preserves_name(self, mock_get_client, sample_config):
+    def test_tag_pins_preserves_name(self, mock_get_client, mock_dag_size, sample_config):
         """tag_pins preserves existing pin name when re-pinning."""
         mock_client = MagicMock()
         mock_get_client.return_value = mock_client
+        mock_dag_size.return_value = 999999
 
         mock_client.pins.return_value = [
             {
@@ -768,3 +808,29 @@ class TestTagPins:
 
         call_kwargs = mock_client.pin.call_args[1]
         assert call_kwargs["name"] == "commit_2026-01-21"
+        assert call_kwargs["metadata"]["size"] == "999999"
+
+    @patch("community_cloud_storage.operations._get_dag_size")
+    @patch("community_cloud_storage.operations._get_client")
+    def test_tag_pins_size_error_still_tags_org(self, mock_get_client, mock_dag_size, sample_config):
+        """If gateway size lookup fails, still tags org without size."""
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+        mock_dag_size.return_value = None  # gateway error
+
+        mock_client.pins.return_value = [
+            {
+                "cid": "QmAAA", "name": "fileA",
+                "allocations": ["12D3KooWNAS"],
+                "metadata": None,
+                "peer_map": {},
+                "replication_factor_min": 2, "replication_factor_max": 3,
+            },
+        ]
+        mock_client.pin.return_value = {}
+
+        result = tag_pins(profile="hrdag", config=sample_config)
+
+        assert result["tagged"] == 1
+        call_kwargs = mock_client.pin.call_args[1]
+        assert call_kwargs["metadata"] == {"org": "hrdag"}
