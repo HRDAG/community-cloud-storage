@@ -32,9 +32,13 @@ class NodeConfig:
     name: str
     host: str
     peer_id: Optional[str] = None
+    reserved_min_gb: int = 0
 
     def to_dict(self) -> dict:
-        return {"host": self.host, "peer_id": self.peer_id}
+        d = {"host": self.host, "peer_id": self.peer_id}
+        if self.reserved_min_gb:
+            d["reserved_min_gb"] = self.reserved_min_gb
+        return d
 
     @classmethod
     def from_dict(cls, name: str, data: dict) -> "NodeConfig":
@@ -45,6 +49,7 @@ class NodeConfig:
             name=name,
             host=data.get("host", name),
             peer_id=data.get("peer_id"),
+            reserved_min_gb=data.get("reserved_min_gb", 0),
         )
 
 
@@ -83,6 +88,8 @@ class CCSConfig:
     default_node: Optional[str] = None
     profiles: dict[str, ProfileConfig] = field(default_factory=dict)
     nodes: dict[str, NodeConfig] = field(default_factory=dict)
+    replication_min: int = 3
+    replication_max: int = 5
 
     def get_node(self, name: str) -> Optional[NodeConfig]:
         """Get node config by name."""
@@ -147,6 +154,16 @@ class CCSConfig:
         # Check auth is set (warning - needed for most operations)
         if not self.auth:
             warnings.append("no cluster auth configured")
+
+        # Check replication settings
+        if self.replication_min < 1:
+            errors.append("replication_min must be >= 1")
+        if self.replication_max < self.replication_min:
+            errors.append("replication_max must be >= replication_min")
+        if self.replication_min > len(self.nodes):
+            warnings.append(
+                f"replication_min ({self.replication_min}) exceeds node count ({len(self.nodes)})"
+            )
 
         return errors, warnings
 
@@ -243,4 +260,6 @@ def load_config(
         default_node=cluster.get("default_node"),
         profiles=profiles,
         nodes=nodes,
+        replication_min=cluster.get("replication_min", 3),
+        replication_max=cluster.get("replication_max", 5),
     )

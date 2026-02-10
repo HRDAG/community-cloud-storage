@@ -21,8 +21,10 @@ from community_cloud_storage.config import (
 )
 from community_cloud_storage.operations import (
     add,
+    ensure_pins,
     health,
     peers,
+    rebalance,
     repair,
     status,
     tag_pins,
@@ -34,6 +36,9 @@ from community_cloud_storage.operations import (
 from community_cloud_storage.types import (
     RC_FAILED,
     RC_CONFIG_ERROR,
+    RC_REBALANCE_NOOP,
+    RC_REBALANCE_CHANGED,
+    RC_REBALANCE_ERRORS,
     RC_REPAIR_CLEAN,
     RC_REPAIR_FIXED,
     RC_REPAIR_LOST,
@@ -449,16 +454,17 @@ def _make_peers_ndjson(peer_list):
     return "\n".join(lines)
 
 
-def _make_pin(cid, peer_statuses):
+def _make_pin(cid, peer_statuses, name="", metadata=None):
     """Build a raw pin dict from cid and {peer_id: (peername, status, error)}."""
     peer_map = {}
     for peer_id, (peername, st, err) in peer_statuses.items():
         peer_map[peer_id] = {"peername": peername, "status": st, "error": err or ""}
     return {
         "cid": cid,
-        "name": "",
+        "name": name,
         "allocations": list(peer_statuses.keys()),
         "peer_map": peer_map,
+        "metadata": metadata,
         "replication_factor_min": 2,
         "replication_factor_max": 4,
     }
@@ -1047,3 +1053,433 @@ class TestTagPins:
         assert result["tagged"] == 1
         call_kwargs = mock_client.pin.call_args[1]
         assert call_kwargs["metadata"] == {"org": "hrdag"}
+
+
+class TestConfigReplication:
+    """Tests for replication config validation."""
+
+    def test_replication_defaults(self):
+        """Default replication_min=3, replication_max=5."""
+        config = CCSConfig()
+        assert config.replication_min == 3
+        assert config.replication_max == 5
+
+    def test_replication_min_less_than_one_is_error(self):
+        """replication_min < 1 is a validation error."""
+        config = CCSConfig(
+            backup_node="chll",
+            nodes={"chll": NodeConfig(name="chll", host="chll", peer_id="12D3KooWCHLL")},
+            replication_min=0,
+        )
+        errors, warnings = config.validate()
+        assert any("replication_min must be >= 1" in e for e in errors)
+
+    def test_replication_max_less_than_min_is_error(self):
+        """replication_max < replication_min is a validation error."""
+        config = CCSConfig(
+            backup_node="chll",
+            nodes={"chll": NodeConfig(name="chll", host="chll", peer_id="12D3KooWCHLL")},
+            replication_min=5,
+            replication_max=3,
+        )
+        errors, warnings = config.validate()
+        assert any("replication_max must be >= replication_min" in e for e in errors)
+
+    def test_replication_min_exceeds_nodes_is_warning(self):
+        """replication_min > node count is a warning."""
+        config = CCSConfig(
+            backup_node="chll",
+            nodes={"chll": NodeConfig(name="chll", host="chll", peer_id="12D3KooWCHLL")},
+            replication_min=3,
+        )
+        errors, warnings = config.validate()
+        assert any("exceeds node count" in w for w in warnings)
+
+    def test_reserved_min_gb_default_zero(self):
+        """NodeConfig.reserved_min_gb defaults to 0."""
+        node = NodeConfig(name="test", host="test")
+        assert node.reserved_min_gb == 0
+
+    def test_reserved_min_gb_from_dict(self):
+        """NodeConfig.from_dict parses reserved_min_gb."""
+        node = NodeConfig.from_dict("pihost", {"host": "pihost", "peer_id": "12D3Koo", "reserved_min_gb": 500})
+        assert node.reserved_min_gb == 500
+
+    def test_reserved_min_gb_in_to_dict_when_set(self):
+        """NodeConfig.to_dict includes reserved_min_gb when non-zero."""
+        node = NodeConfig(name="pihost", host="pihost", reserved_min_gb=500)
+        d = node.to_dict()
+        assert d["reserved_min_gb"] == 500
+
+    def test_reserved_min_gb_not_in_to_dict_when_zero(self):
+        """NodeConfig.to_dict omits reserved_min_gb when zero."""
+        node = NodeConfig(name="pihost", host="pihost", reserved_min_gb=0)
+        d = node.to_dict()
+        assert "reserved_min_gb" not in d
+
+
+class TestEnsurePinsMetadata:
+    """Tests for ensure_pins metadata preservation (read-merge-write fix)."""
+
+    @patch("community_cloud_storage.operations._get_client")
+    def test_ensure_pins_preserves_metadata(self, mock_get_client, sample_config):
+        """ensure_pins should preserve meta-org and meta-size on re-pin."""
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+
+        mock_client.pins.return_value = [
+            _make_pin("QmAAA", {
+                "12D3KooWMEER": ("meerkat", "pinned", None),
+            }, name="commit_2026-01-15", metadata={"org": "hrdag", "size": "5000"}),
+        ]
+        mock_client.pin.return_value = {}
+
+        result = ensure_pins(profile="hrdag", config=sample_config)
+
+        assert result.fixed == 1
+        call_kwargs = mock_client.pin.call_args[1]
+        assert call_kwargs["metadata"] == {"org": "hrdag", "size": "5000"}
+        assert call_kwargs["name"] == "commit_2026-01-15"
+
+    @patch("community_cloud_storage.operations._get_client")
+    def test_ensure_pins_merges_allocations(self, mock_get_client, sample_config):
+        """ensure_pins should merge allocations, not replace."""
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+
+        mock_client.pins.return_value = [
+            _make_pin("QmAAA", {
+                "12D3KooWMEER": ("meerkat", "pinned", None),
+                "12D3KooWPIHOST": ("pihost", "pinned", None),
+            }, name="fileA", metadata={"org": "hrdag"}),
+        ]
+        mock_client.pin.return_value = {}
+
+        result = ensure_pins(profile="hrdag", config=sample_config)
+
+        call_kwargs = mock_client.pin.call_args[1]
+        allocs = set(call_kwargs["allocations"])
+        # Should contain: existing (MEER, PIHOST) + required (NAS, CHLL)
+        assert "12D3KooWNAS" in allocs
+        assert "12D3KooWCHLL" in allocs
+        assert "12D3KooWMEER" in allocs     # existing preserved
+        assert "12D3KooWPIHOST" in allocs   # existing preserved
+
+
+@pytest.fixture
+def rebalance_config():
+    """Config for rebalance tests with 5 nodes and replication settings."""
+    return CCSConfig(
+        auth=ClusterAuth(user="admin", password="secret"),
+        backup_node="chll",
+        default_node="nas",
+        replication_min=3,
+        replication_max=5,
+        profiles={
+            "hrdag": ProfileConfig(name="hrdag", primary="nas"),
+            "orgB": ProfileConfig(name="orgB", primary="meerkat"),
+        },
+        nodes={
+            "nas": NodeConfig(name="nas", host="nas", peer_id="12D3KooWNAS", reserved_min_gb=200),
+            "meerkat": NodeConfig(name="meerkat", host="meerkat", peer_id="12D3KooWMEER", reserved_min_gb=200),
+            "chll": NodeConfig(name="chll", host="chll", peer_id="12D3KooWCHLL", reserved_min_gb=200),
+            "pihost": NodeConfig(name="pihost", host="pihost", peer_id="12D3KooWPIHOST", reserved_min_gb=500),
+            "ipfs1": NodeConfig(name="ipfs1", host="ipfs1", peer_id="12D3KooWIPFS1", reserved_min_gb=200),
+        },
+    )
+
+
+def _mock_freespace_response(peer_freespace: dict[str, int]):
+    """Build mock response for /monitor/metrics/freespace.
+
+    The real API returns a JSON array (not NDJSON).
+    """
+    import json as _json
+    metrics = [
+        {"name": "freespace", "peer": peer_id, "value": str(free_bytes)}
+        for peer_id, free_bytes in peer_freespace.items()
+    ]
+    mock_resp = MagicMock()
+    mock_resp.text = _json.dumps(metrics)
+    return mock_resp
+
+
+class TestRebalance:
+    """Tests for rebalance() operation."""
+
+    FREESPACE = {
+        "12D3KooWNAS": 1_390_000_000_000,
+        "12D3KooWMEER": 2_460_000_000_000,
+        "12D3KooWCHLL": 1_390_000_000_000,
+        "12D3KooWPIHOST": 18_190_000_000_000,
+        "12D3KooWIPFS1": 1_610_000_000_000,
+    }
+
+    def _setup_mock(self, mock_get_client, pins, freespace=None):
+        """Common mock setup for rebalance tests."""
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+        mock_client.pins.return_value = pins
+        mock_client._request.return_value = _mock_freespace_response(
+            freespace or self.FREESPACE
+        )
+        mock_client.pin.return_value = {}
+        return mock_client
+
+    @patch("community_cloud_storage.operations._get_client")
+    def test_all_correct_no_changes(self, mock_get_client, rebalance_config):
+        """All pins already at replication target -> noop."""
+        pins = [
+            _make_pin("QmAAA", {
+                "12D3KooWNAS": ("nas", "pinned", None),
+                "12D3KooWCHLL": ("chll", "pinned", None),
+                "12D3KooWPIHOST": ("pihost", "pinned", None),
+            }, name="fileA", metadata={"org": "hrdag", "size": "1000"}),
+        ]
+        mock_client = self._setup_mock(mock_get_client, pins)
+
+        result = rebalance(config=rebalance_config)
+
+        assert result.already_correct == 1
+        assert result.added_replicas == 0
+        assert result.removed_replicas == 0
+        assert result.exit_code == 0
+        mock_client.pin.assert_not_called()
+
+    @patch("community_cloud_storage.operations._get_client")
+    def test_under_replicated_adds_replicas(self, mock_get_client, rebalance_config):
+        """Pin with 2 replicas (below min=3) gets additional replica."""
+        pins = [
+            _make_pin("QmAAA", {
+                "12D3KooWNAS": ("nas", "pinned", None),
+                "12D3KooWCHLL": ("chll", "pinned", None),
+            }, name="fileA", metadata={"org": "hrdag", "size": "1000"}),
+        ]
+        mock_client = self._setup_mock(mock_get_client, pins)
+
+        result = rebalance(config=rebalance_config)
+
+        assert result.added_replicas == 1
+        assert result.exit_code == 1
+        mock_client.pin.assert_called_once()
+        call_kwargs = mock_client.pin.call_args[1]
+        allocs = call_kwargs["allocations"]
+        assert "12D3KooWPIHOST" in allocs
+        assert "12D3KooWNAS" in allocs
+        assert "12D3KooWCHLL" in allocs
+
+    @patch("community_cloud_storage.operations._get_client")
+    def test_over_replicated_removes_excess(self, mock_get_client, rebalance_config):
+        """Pin with 5+ replicas (above max) gets excess removed."""
+        rebalance_config.replication_max = 3
+        pins = [
+            _make_pin("QmAAA", {
+                "12D3KooWNAS": ("nas", "pinned", None),
+                "12D3KooWCHLL": ("chll", "pinned", None),
+                "12D3KooWMEER": ("meerkat", "pinned", None),
+                "12D3KooWPIHOST": ("pihost", "pinned", None),
+                "12D3KooWIPFS1": ("ipfs1", "pinned", None),
+            }, name="fileA", metadata={"org": "hrdag", "size": "1000"}),
+        ]
+        mock_client = self._setup_mock(mock_get_client, pins)
+
+        result = rebalance(config=rebalance_config)
+
+        assert result.removed_replicas == 1
+        call_kwargs = mock_client.pin.call_args[1]
+        allocs = call_kwargs["allocations"]
+        assert len(allocs) == 3
+        assert "12D3KooWNAS" in allocs
+        assert "12D3KooWCHLL" in allocs
+
+    @patch("community_cloud_storage.operations._get_client")
+    def test_primary_backup_never_removed(self, mock_get_client, rebalance_config):
+        """Primary and backup are never removed even when over-replicated."""
+        rebalance_config.replication_max = 2
+        pins = [
+            _make_pin("QmAAA", {
+                "12D3KooWNAS": ("nas", "pinned", None),
+                "12D3KooWCHLL": ("chll", "pinned", None),
+                "12D3KooWMEER": ("meerkat", "pinned", None),
+            }, name="fileA", metadata={"org": "hrdag", "size": "1000"}),
+        ]
+        mock_client = self._setup_mock(mock_get_client, pins)
+
+        result = rebalance(config=rebalance_config)
+
+        call_kwargs = mock_client.pin.call_args[1]
+        allocs = call_kwargs["allocations"]
+        assert "12D3KooWNAS" in allocs
+        assert "12D3KooWCHLL" in allocs
+        assert "12D3KooWMEER" not in allocs
+
+    @patch("community_cloud_storage.operations._get_client")
+    def test_capacity_limit_respected(self, mock_get_client, rebalance_config):
+        """Don't add replicas to nodes at or below reserved_min_gb."""
+        rebalance_config.nodes["pihost"].reserved_min_gb = 20000
+        pins = [
+            _make_pin("QmAAA", {
+                "12D3KooWNAS": ("nas", "pinned", None),
+                "12D3KooWCHLL": ("chll", "pinned", None),
+            }, name="fileA", metadata={"org": "hrdag", "size": "1000"}),
+        ]
+        mock_client = self._setup_mock(mock_get_client, pins)
+
+        result = rebalance(config=rebalance_config)
+
+        assert result.added_replicas == 1
+        call_kwargs = mock_client.pin.call_args[1]
+        allocs = call_kwargs["allocations"]
+        assert "12D3KooWPIHOST" not in allocs
+        assert "12D3KooWMEER" in allocs
+
+    @patch("community_cloud_storage.operations._get_client")
+    def test_metadata_preserved(self, mock_get_client, rebalance_config):
+        """Re-pin preserves name, metadata, and replication factors."""
+        pins = [
+            _make_pin("QmAAA", {
+                "12D3KooWNAS": ("nas", "pinned", None),
+                "12D3KooWCHLL": ("chll", "pinned", None),
+            }, name="commit_2026-01-15", metadata={"org": "hrdag", "size": "5000000"}),
+        ]
+        mock_client = self._setup_mock(mock_get_client, pins)
+
+        result = rebalance(config=rebalance_config)
+
+        call_kwargs = mock_client.pin.call_args[1]
+        assert call_kwargs["name"] == "commit_2026-01-15"
+        assert call_kwargs["metadata"] == {"org": "hrdag", "size": "5000000"}
+        assert call_kwargs["replication_factor_min"] == 2
+        assert call_kwargs["replication_factor_max"] == 4
+
+    @patch("community_cloud_storage.operations._get_client")
+    def test_dry_run_no_modifications(self, mock_get_client, rebalance_config):
+        """Dry run reports changes but doesn't call client.pin()."""
+        pins = [
+            _make_pin("QmAAA", {
+                "12D3KooWNAS": ("nas", "pinned", None),
+                "12D3KooWCHLL": ("chll", "pinned", None),
+            }, name="fileA", metadata={"org": "hrdag"}),
+        ]
+        mock_client = self._setup_mock(mock_get_client, pins)
+
+        result = rebalance(config=rebalance_config, dry_run=True)
+
+        assert result.dry_run is True
+        assert result.added_replicas == 1
+        mock_client.pin.assert_not_called()
+
+    @patch("community_cloud_storage.operations._get_client")
+    def test_mixed_under_over_correct(self, mock_get_client, rebalance_config):
+        """Mix of under-replicated, over-replicated, and correct pins."""
+        rebalance_config.replication_max = 3
+        pins = [
+            _make_pin("QmUNDER", {
+                "12D3KooWNAS": ("nas", "pinned", None),
+                "12D3KooWCHLL": ("chll", "pinned", None),
+            }, name="under", metadata={"org": "hrdag"}),
+            _make_pin("QmCORRECT", {
+                "12D3KooWNAS": ("nas", "pinned", None),
+                "12D3KooWCHLL": ("chll", "pinned", None),
+                "12D3KooWPIHOST": ("pihost", "pinned", None),
+            }, name="correct", metadata={"org": "hrdag"}),
+            _make_pin("QmOVER", {
+                "12D3KooWNAS": ("nas", "pinned", None),
+                "12D3KooWCHLL": ("chll", "pinned", None),
+                "12D3KooWMEER": ("meerkat", "pinned", None),
+                "12D3KooWIPFS1": ("ipfs1", "pinned", None),
+            }, name="over", metadata={"org": "hrdag"}),
+        ]
+        mock_client = self._setup_mock(mock_get_client, pins)
+
+        result = rebalance(config=rebalance_config)
+
+        assert result.total_pins == 3
+        assert result.already_correct == 1
+        assert result.added_replicas == 1
+        assert result.removed_replicas == 1
+        assert mock_client.pin.call_count == 2
+
+    @patch("community_cloud_storage.operations._get_client")
+    def test_orphaned_allocation_cleaned(self, mock_get_client, rebalance_config):
+        """Pins allocated to unknown peer IDs get cleaned up."""
+        pins = [
+            _make_pin("QmORPHAN", {
+                "12D3KooWNAS": ("nas", "pinned", None),
+                "12D3KooWCHLL": ("chll", "pinned", None),
+                "12D3KooWPIHOST": ("pihost", "pinned", None),
+                "12D3KooWOLD_PIHOST": ("old-pihost", "pinned", None),
+            }, name="orphan", metadata={"org": "hrdag"}),
+        ]
+        mock_client = self._setup_mock(mock_get_client, pins)
+
+        result = rebalance(config=rebalance_config)
+
+        call_kwargs = mock_client.pin.call_args[1]
+        allocs = call_kwargs["allocations"]
+        assert "12D3KooWOLD_PIHOST" not in allocs
+
+    @patch("community_cloud_storage.operations._get_client")
+    def test_cross_org_different_primaries(self, mock_get_client, rebalance_config):
+        """Pins from different orgs keep their respective primaries."""
+        pins = [
+            _make_pin("QmHRDAG", {
+                "12D3KooWNAS": ("nas", "pinned", None),
+                "12D3KooWCHLL": ("chll", "pinned", None),
+            }, name="hrdag-file", metadata={"org": "hrdag"}),
+            _make_pin("QmORGB", {
+                "12D3KooWMEER": ("meerkat", "pinned", None),
+                "12D3KooWCHLL": ("chll", "pinned", None),
+            }, name="orgB-file", metadata={"org": "orgB"}),
+        ]
+        mock_client = self._setup_mock(mock_get_client, pins)
+
+        result = rebalance(config=rebalance_config)
+
+        assert result.added_replicas == 2
+        assert mock_client.pin.call_count == 2
+        call1 = mock_client.pin.call_args_list[0][1]
+        assert "12D3KooWNAS" in call1["allocations"]
+        assert "12D3KooWCHLL" in call1["allocations"]
+        call2 = mock_client.pin.call_args_list[1][1]
+        assert "12D3KooWMEER" in call2["allocations"]
+        assert "12D3KooWCHLL" in call2["allocations"]
+
+    @patch("community_cloud_storage.operations._get_client")
+    def test_repin_error_counted(self, mock_get_client, rebalance_config):
+        """Failed re-pin counted as error, does not crash."""
+        pins = [
+            _make_pin("QmFAIL", {
+                "12D3KooWNAS": ("nas", "pinned", None),
+                "12D3KooWCHLL": ("chll", "pinned", None),
+            }, name="fail", metadata={"org": "hrdag"}),
+        ]
+        mock_client = self._setup_mock(mock_get_client, pins)
+        mock_client.pin.side_effect = ClusterAPIError("connection refused", 500)
+
+        result = rebalance(config=rebalance_config)
+
+        assert result.errors == 1
+        assert result.exit_code == 2
+        assert result.actions[0].error == "connection refused"
+
+    @patch("community_cloud_storage.operations._get_client")
+    def test_json_output_valid(self, mock_get_client, rebalance_config):
+        """RebalanceResult.to_json() produces valid JSON."""
+        pins = [
+            _make_pin("QmAAA", {
+                "12D3KooWNAS": ("nas", "pinned", None),
+                "12D3KooWCHLL": ("chll", "pinned", None),
+                "12D3KooWPIHOST": ("pihost", "pinned", None),
+            }, name="fileA", metadata={"org": "hrdag"}),
+        ]
+        self._setup_mock(mock_get_client, pins)
+
+        result = rebalance(config=rebalance_config)
+
+        import json as _json
+        parsed = _json.loads(result.to_json())
+        assert "checked_at" in parsed
+        assert parsed["total_pins"] == 1
+        assert parsed["replication_min"] == 3
+        assert parsed["replication_max"] == 5

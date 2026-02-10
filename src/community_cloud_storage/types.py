@@ -487,3 +487,79 @@ class RepairResult:
         if self.broken > 0:
             return RC_REPAIR_FIXED
         return RC_REPAIR_CLEAN
+
+
+# Return codes for RebalanceResult
+RC_REBALANCE_NOOP = 0       # All pins already at target replication
+RC_REBALANCE_CHANGED = 1    # Some pins were rebalanced
+RC_REBALANCE_ERRORS = 2     # Some re-pins failed
+
+
+@dataclass
+class RebalancePinAction:
+    """A single pin rebalance action."""
+    cid: str
+    name: Optional[str]
+    action: str                         # "add_replicas", "remove_replicas", "already_correct"
+    current_allocations: list[str]      # peer IDs before
+    new_allocations: list[str]          # peer IDs after (empty if already_correct)
+    added_peers: list[str]              # peer names added
+    removed_peers: list[str]            # peer names removed
+    error: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        d = {
+            "cid": self.cid,
+            "name": self.name,
+            "action": self.action,
+            "current_allocations": self.current_allocations,
+            "new_allocations": self.new_allocations,
+            "added_peers": self.added_peers,
+            "removed_peers": self.removed_peers,
+        }
+        if self.error:
+            d["error"] = self.error
+        return d
+
+
+@dataclass
+class RebalanceResult:
+    """Result of rebalance operation."""
+    checked_at: datetime
+    total_pins: int
+    already_correct: int
+    added_replicas: int                 # pins that got new replicas
+    removed_replicas: int               # pins that had excess replicas removed
+    errors: int
+    dry_run: bool
+    replication_min: int
+    replication_max: int
+    actions: list[RebalancePinAction] = field(default_factory=list)
+    node_summary: dict = field(default_factory=dict)  # {node_name: {before: N, after: N}}
+
+    def to_dict(self) -> dict:
+        return {
+            "checked_at": self.checked_at.isoformat(),
+            "total_pins": self.total_pins,
+            "already_correct": self.already_correct,
+            "added_replicas": self.added_replicas,
+            "removed_replicas": self.removed_replicas,
+            "errors": self.errors,
+            "dry_run": self.dry_run,
+            "replication_min": self.replication_min,
+            "replication_max": self.replication_max,
+            "actions": [a.to_dict() for a in self.actions if a.action != "already_correct"],
+            "node_summary": self.node_summary,
+        }
+
+    def to_json(self, indent: int = 2) -> str:
+        return json.dumps(self.to_dict(), indent=indent)
+
+    @property
+    def exit_code(self) -> int:
+        """0=no changes needed, 1=changes made, 2=errors occurred."""
+        if self.errors > 0:
+            return RC_REBALANCE_ERRORS
+        if self.added_replicas > 0 or self.removed_replicas > 0:
+            return RC_REBALANCE_CHANGED
+        return RC_REBALANCE_NOOP

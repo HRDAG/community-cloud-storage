@@ -137,7 +137,9 @@ class ClusterClient:
         return response.json()
 
     def pin(self, cid: str, name: str = None, allocations: list[str] = None,
-            metadata: dict = None) -> dict:
+            metadata: dict = None,
+            replication_factor_min: int = None,
+            replication_factor_max: int = None) -> dict:
         """
         Pin or re-pin a CID with updated allocations.
 
@@ -164,6 +166,10 @@ class ClusterClient:
         if metadata:
             for key, value in metadata.items():
                 params[f"meta-{key}"] = value
+        if replication_factor_min is not None:
+            params["replication-factor-min"] = str(replication_factor_min)
+        if replication_factor_max is not None:
+            params["replication-factor-max"] = str(replication_factor_max)
 
         query = urlencode(params) if params else ""
         endpoint = f"/pins/{cid}"

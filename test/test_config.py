@@ -118,6 +118,7 @@ class TestCCSConfig:
                 "chll": NodeConfig(name="chll", host="chll", peer_id="12D3B"),
             },
             auth=ClusterAuth(user="admin", password="secret"),
+            replication_min=2,
         )
         errors, warnings = cfg.validate()
         assert errors == []

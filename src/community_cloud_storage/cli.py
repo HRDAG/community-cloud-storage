@@ -466,6 +466,114 @@ def ensure_pins(ctx, profile: str, host: str, dry_run: bool) -> None:
 
 @cli.command()
 @click.option(
+    "--host",
+    callback=validate_peername,
+    help="Override cluster host to talk to (default: from config)",
+)
+@click.option("--json", "output_json_flag", is_flag=True, help="Output JSON")
+@click.option(
+    "--output",
+    type=click.Path(path_type=Path),
+    help="Write JSON to file (implies JSON format)",
+)
+@click.option("--dry-run", is_flag=True, help="Show what would change without modifying pins")
+@click.pass_context
+@handle_api_error
+def rebalance(ctx, host: str, output_json_flag: bool, output: Path, dry_run: bool) -> None:
+    """
+    Rebalance pin allocations across the cluster.
+
+    Converges all pins toward the configured replication target by adding
+    replicas to under-replicated pins and removing excess replicas from
+    over-replicated pins. Always preserves primary + backup allocations.
+
+    Prioritizes nodes with most free space when adding replicas. Respects
+    per-node reserved_min_gb capacity limits.
+
+    Exit codes: 0=no changes needed, 1=changes made, 2=errors occurred.
+
+    Examples:
+
+        ccs rebalance --dry-run
+
+        ccs rebalance --json
+
+        ccs rebalance --output /tmp/rebalance.json
+    """
+    config = _load_config(ctx)
+
+    mode = "DRY RUN" if dry_run else "LIVE"
+    click.echo(f"rebalance [{mode}] target={config.replication_min}-{config.replication_max}")
+    click.echo()
+
+    def progress(current, total, pin_name, action):
+        if action not in ("checking", "already_correct"):
+            click.echo(f"  [{current}/{total}] {pin_name}  {action}")
+        elif current == total or current % 500 == 0:
+            click.echo(f"  [{current}/{total}] scanned...")
+
+    result = operations.rebalance(
+        config=config,
+        host=host,
+        dry_run=dry_run,
+        progress_callback=progress,
+    )
+
+    if output:
+        with open(output, "w") as f:
+            f.write(result.to_json())
+        click.echo(f"Rebalance report written to: {output}")
+        sys.exit(result.exit_code)
+
+    if output_json_flag:
+        click.echo(result.to_json())
+        sys.exit(result.exit_code)
+
+    # Human-readable summary
+    click.echo()
+    click.echo("Results:")
+    click.echo(f"  total pins:       {result.total_pins}")
+    click.echo(f"  already correct:  {result.already_correct}")
+    verb_add = "would add replicas" if dry_run else "added replicas"
+    verb_rm = "would remove replicas" if dry_run else "removed replicas"
+    click.echo(f"  {verb_add}:  {result.added_replicas}")
+    click.echo(f"  {verb_rm}: {result.removed_replicas}")
+    if result.errors:
+        click.echo(f"  errors:           {result.errors}")
+
+    # Node distribution table
+    click.echo()
+    click.echo(f"  {'node':<14}{'before':>8}{'after':>8}{'change':>8}")
+    for node_name, counts in result.node_summary.items():
+        before = counts["before"]
+        after = counts["after"]
+        change = after - before
+        sign = "+" if change > 0 else ""
+        click.echo(f"  {node_name:<14}{before:>8}{after:>8}{sign + str(change) if change else '-':>8}")
+
+    # Show actions (non-correct) up to 20
+    changed_actions = [a for a in result.actions if a.action != "already_correct"]
+    if changed_actions:
+        click.echo()
+        click.echo(f"actions ({len(changed_actions)}):")
+        for action in changed_actions[:20]:
+            cid_short = action.cid[:20] + "..." if len(action.cid) > 20 else action.cid
+            name_str = f"  {action.name}" if action.name else ""
+            click.echo(f"  {cid_short}{name_str}  [{action.action}]")
+            if action.added_peers:
+                click.echo(f"    + {', '.join(action.added_peers)}")
+            if action.removed_peers:
+                click.echo(f"    - {', '.join(action.removed_peers)}")
+            if action.error:
+                click.echo(f"    error: {action.error}")
+        if len(changed_actions) > 20:
+            click.echo(f"  ... and {len(changed_actions) - 20} more")
+
+    sys.exit(result.exit_code)
+
+
+@cli.command()
+@click.option(
     "--validate-only",
     is_flag=True,
     help="Only validate config, don't display it",

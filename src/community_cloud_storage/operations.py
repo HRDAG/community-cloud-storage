@@ -29,6 +29,8 @@ from community_cloud_storage.types import (
     NodeHealth,
     PeerInfo,
     PinStatus,
+    RebalancePinAction,
+    RebalanceResult,
     RepairResult,
     RC_SUCCESS,
     RC_PARTIAL,
@@ -118,6 +120,53 @@ def _get_allocations(profile: str, config: CCSConfig) -> list[str]:
         raise AllocationError(f"Backup node '{backup.name}' has no peer_id in config")
 
     return [primary.peer_id, backup.peer_id]
+
+
+def _read_pin_metadata(pin_data: dict) -> dict:
+    """Extract metadata fields from raw pin data for read-merge-write re-pin.
+
+    Returns dict with keys: name, metadata, replication_factor_min, replication_factor_max.
+    All values are safe to pass directly to client.pin().
+    """
+    return {
+        "name": pin_data.get("name") or None,
+        "metadata": pin_data.get("metadata") or {},
+        "replication_factor_min": pin_data.get("replication_factor_min"),
+        "replication_factor_max": pin_data.get("replication_factor_max"),
+    }
+
+
+def _get_cluster_freespace(client: ClusterClient) -> dict[str, int]:
+    """Get free space in bytes per peer_id from cluster metrics.
+
+    Calls GET /monitor/metrics/freespace which returns a JSON array:
+    [{"name":"freespace","peer":"12D3Koo...","value":"1527113670808",...}, ...]
+
+    Returns:
+        Dict mapping peer_id -> free_bytes.
+        Peers that don't report freespace are omitted.
+    """
+    import json
+    response = client._request("GET", "/monitor/metrics/freespace")
+    metrics = json.loads(response.text)  # JSON array, not NDJSON
+    result = {}
+    for metric in metrics:
+        peer_id = metric.get("peer")
+        value = metric.get("value", "0")
+        try:
+            result[peer_id] = int(value)
+        except (ValueError, TypeError):
+            pass
+    return result
+
+
+def _build_peer_id_to_name(config: CCSConfig) -> dict[str, str]:
+    """Build mapping from peer_id -> node_name from config."""
+    return {
+        node.peer_id: node.name
+        for node in config.nodes.values()
+        if node.peer_id
+    }
 
 
 def add(
@@ -572,10 +621,9 @@ def ensure_pins(
     Scans all cluster pins and re-pins any that are missing the profile's
     required peers (primary + backup).
 
-    WARNING: Re-pinning REPLACES allocations. Cluster v1.1.5 reduces to
-    replication_factor_min (2) allocations. Pins currently with 3 replicas
-    will be reduced to 2 [primary, backup]. The cluster allocator may add
-    a 3rd replica later.
+    Re-pinning uses read-merge-write to preserve metadata and merge
+    allocations. Existing allocations are kept and required peers are added
+    (union of existing + required).
 
     Args:
         profile: Profile name (e.g., "hrdag")
@@ -620,7 +668,18 @@ def ensure_pins(
             continue
 
         try:
-            client.pin(pin.cid, name=name, allocations=allocations)
+            # Read-merge-write: preserve existing metadata
+            pin_meta = _read_pin_metadata(pin_data)
+            # Merge allocations: keep existing + add required
+            merged_allocs = list(current_allocs | required_set)
+            client.pin(
+                pin.cid,
+                name=pin_meta["name"],
+                allocations=merged_allocs,
+                metadata=pin_meta["metadata"],
+                replication_factor_min=pin_meta["replication_factor_min"],
+                replication_factor_max=pin_meta["replication_factor_max"],
+            )
             fixed += 1
             if progress_callback:
                 progress_callback(i + 1, total, name, "fixed")
@@ -888,3 +947,250 @@ def tag_pins(
         "errors": errors,
         "dry_run": dry_run,
     }
+
+
+def rebalance(
+    config: CCSConfig,
+    host: str = None,
+    dry_run: bool = False,
+    progress_callback=None,
+) -> RebalanceResult:
+    """Rebalance pin allocations across the cluster.
+
+    Bidirectional convergence: adds replicas to under-replicated pins,
+    removes excess replicas from over-replicated pins. Respects
+    primary+backup requirements, per-node capacity reserves, and
+    configurable replication targets.
+
+    Args:
+        config: CCSConfig with nodes, profiles, replication settings
+        host: Override which cluster node to talk to
+        dry_run: If True, report planned changes without modifying
+        progress_callback: Optional callable(current, total, pin_name, action)
+
+    Returns:
+        RebalanceResult with per-pin actions and summary
+    """
+    import time
+
+    client = _get_client(config, host)
+    peer_id_to_name = _build_peer_id_to_name(config)
+    name_to_peer_id = {v: k for k, v in peer_id_to_name.items()}
+
+    # Known peer IDs (nodes in our config)
+    known_peer_ids = set(peer_id_to_name.keys())
+
+    # Build required-peers map: for pins with meta-org, we know which profile they belong to
+    # Required = profile's primary + cluster backup
+    backup_peer_id = config.get_peer_id(config.backup_node) if config.backup_node else None
+
+    # Get free space from cluster metrics
+    freespace = _get_cluster_freespace(client)
+
+    # Build available capacity: free_bytes - reserved_min_gb (in bytes)
+    available = {}
+    for peer_id, free_bytes in freespace.items():
+        node_name = peer_id_to_name.get(peer_id)
+        if node_name:
+            node_cfg = config.get_node(node_name)
+            reserved_bytes = (node_cfg.reserved_min_gb * (1024 ** 3)) if node_cfg else 0
+            available[peer_id] = max(0, free_bytes - reserved_bytes)
+
+    # Read all pins
+    all_pins = client.pins()
+    total = len(all_pins)
+
+    repl_min = config.replication_min
+    repl_max = config.replication_max
+
+    already_correct = 0
+    added_replicas = 0
+    removed_replicas = 0
+    errors = 0
+    actions = []
+
+    # Track per-node pin counts for summary
+    node_before = {name: 0 for name in config.nodes}
+    node_after = {name: 0 for name in config.nodes}
+
+    for i, pin_data in enumerate(all_pins):
+        pin = PinStatus.from_cluster_status(pin_data)
+        pin_name = pin.name or ""
+        cid = pin.cid
+
+        if progress_callback:
+            progress_callback(i + 1, total, pin_name, "checking")
+
+        # Count current allocations per node (before)
+        for alloc_peer in pin.allocations:
+            nname = peer_id_to_name.get(alloc_peer)
+            if nname and nname in node_before:
+                node_before[nname] += 1
+
+        # Determine required peers for this pin
+        required_peers = set()
+        pin_metadata = pin_data.get("metadata") or {}
+        org = pin_metadata.get("org")
+        if org:
+            profile = config.get_profile(org)
+            if profile:
+                primary_node = config.get_primary_for_profile(org)
+                if primary_node and primary_node.peer_id:
+                    required_peers.add(primary_node.peer_id)
+        if backup_peer_id:
+            required_peers.add(backup_peer_id)
+
+        # Current allocations — only count known peers
+        current_allocs = set(pin.allocations) & known_peer_ids
+        # Orphaned allocations (peer IDs not in our config) — always remove
+        orphaned = set(pin.allocations) - known_peer_ids
+
+        # Start with current known allocations
+        new_allocs = set(current_allocs)
+
+        # Ensure required peers are always included
+        new_allocs |= required_peers
+
+        # --- ADD replicas if under-replicated ---
+        if len(new_allocs) < repl_min:
+            # Candidates: known peers not already allocated, with available capacity
+            candidates = []
+            for peer_id in known_peer_ids - new_allocs:
+                cap = available.get(peer_id, 0)
+                if cap > 0:
+                    candidates.append((cap, peer_id))
+            # Sort by most free space (descending)
+            candidates.sort(reverse=True)
+
+            needed = repl_min - len(new_allocs)
+            for _, peer_id in candidates[:needed]:
+                new_allocs.add(peer_id)
+
+        # --- REMOVE replicas if over-replicated ---
+        if len(new_allocs) > repl_max:
+            # Remove non-required peers with least free space
+            removable = new_allocs - required_peers
+            # Sort removable by LEAST free space first (remove fullest nodes)
+            removable_sorted = sorted(
+                removable,
+                key=lambda pid: available.get(pid, 0)
+            )
+            excess = len(new_allocs) - repl_max
+            for peer_id in removable_sorted[:excess]:
+                new_allocs.discard(peer_id)
+
+        # Determine what changed
+        added = new_allocs - current_allocs
+        removed = (current_allocs - new_allocs) | orphaned
+
+        if not added and not removed:
+            already_correct += 1
+            # Count after (same as before for this pin)
+            for alloc_peer in new_allocs:
+                nname = peer_id_to_name.get(alloc_peer)
+                if nname and nname in node_after:
+                    node_after[nname] += 1
+            actions.append(RebalancePinAction(
+                cid=cid, name=pin_name, action="already_correct",
+                current_allocations=list(current_allocs),
+                new_allocations=[],
+                added_peers=[], removed_peers=[],
+            ))
+            continue
+
+        # Determine action type
+        if added and removed:
+            action_type = "add_replicas"
+        elif added:
+            action_type = "add_replicas"
+        else:
+            action_type = "remove_replicas"
+
+        added_names = [peer_id_to_name.get(p, p[:16]) for p in added]
+        removed_names = [peer_id_to_name.get(p, p[:16]) for p in removed]
+
+        if dry_run:
+            if added:
+                added_replicas += 1
+            if removed:
+                removed_replicas += 1
+            if progress_callback:
+                progress_callback(i + 1, total, pin_name, f"would {action_type}")
+            # Count after with new allocs
+            for alloc_peer in new_allocs:
+                nname = peer_id_to_name.get(alloc_peer)
+                if nname and nname in node_after:
+                    node_after[nname] += 1
+            actions.append(RebalancePinAction(
+                cid=cid, name=pin_name, action=action_type,
+                current_allocations=list(current_allocs),
+                new_allocations=list(new_allocs),
+                added_peers=added_names, removed_peers=removed_names,
+            ))
+            continue
+
+        # Execute re-pin with read-merge-write
+        try:
+            pin_meta = _read_pin_metadata(pin_data)
+            client.pin(
+                cid,
+                name=pin_meta["name"],
+                allocations=list(new_allocs),
+                metadata=pin_meta["metadata"],
+                replication_factor_min=pin_meta["replication_factor_min"],
+                replication_factor_max=pin_meta["replication_factor_max"],
+            )
+            if added:
+                added_replicas += 1
+            if removed:
+                removed_replicas += 1
+            if progress_callback:
+                progress_callback(i + 1, total, pin_name, action_type)
+            # Count after
+            for alloc_peer in new_allocs:
+                nname = peer_id_to_name.get(alloc_peer)
+                if nname and nname in node_after:
+                    node_after[nname] += 1
+            actions.append(RebalancePinAction(
+                cid=cid, name=pin_name, action=action_type,
+                current_allocations=list(current_allocs),
+                new_allocations=list(new_allocs),
+                added_peers=added_names, removed_peers=removed_names,
+            ))
+            time.sleep(0.05)
+        except Exception as e:
+            errors += 1
+            # Count after as unchanged (re-pin failed)
+            for alloc_peer in current_allocs:
+                nname = peer_id_to_name.get(alloc_peer)
+                if nname and nname in node_after:
+                    node_after[nname] += 1
+            actions.append(RebalancePinAction(
+                cid=cid, name=pin_name, action=action_type,
+                current_allocations=list(current_allocs),
+                new_allocations=list(new_allocs),
+                added_peers=added_names, removed_peers=removed_names,
+                error=str(e),
+            ))
+
+    # Build node summary
+    node_summary = {}
+    for name in config.nodes:
+        node_summary[name] = {
+            "before": node_before.get(name, 0),
+            "after": node_after.get(name, 0),
+        }
+
+    return RebalanceResult(
+        checked_at=datetime.now(timezone.utc),
+        total_pins=total,
+        already_correct=already_correct,
+        added_replicas=added_replicas,
+        removed_replicas=removed_replicas,
+        errors=errors,
+        dry_run=dry_run,
+        replication_min=repl_min,
+        replication_max=repl_max,
+        actions=actions,
+        node_summary=node_summary,
+    )
